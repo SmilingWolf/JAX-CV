@@ -31,7 +31,9 @@ class Recall(metrics.Metric):
                 if from_logits:
                     preds = flax.linen.activation.sigmoid(preds)
 
+                labels = labels > threshold
                 preds = preds > threshold
+
                 return cls(
                     true_positives=((preds == 1) & (labels == 1)).sum(),
                     false_negatives=((preds == 0) & (labels == 1)).sum(),

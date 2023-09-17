@@ -228,6 +228,7 @@ class DataGenerator:
             num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False,
         )
+        dataset = dataset.ignore_errors()
         dataset = dataset.shuffle(2 * self.batch_size)
         dataset = dataset.map(
             self.parse_single_record,

@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from Generators.WDTaggerGen import DataGenerator
 from Metrics.F1Score import F1Score
+from Metrics.MCC import MCC
 from Models import SwinV2
 
 
@@ -18,6 +19,7 @@ from Models import SwinV2
 class Metrics(metrics.Collection):
     loss: metrics.Average.from_output("loss")
     f1score: F1Score.with_config(threshold=0.5, from_logits=True)
+    mcc: MCC.with_config(threshold=0.5, from_logits=True)
 
 
 class TrainState(train_state.TrainState):
@@ -67,15 +69,22 @@ def train_step(state, batch):
             train=True,
             rngs={"dropout": dropout_train_key},
         )
-        loss = optax.sigmoid_binary_cross_entropy(
-            logits=logits, labels=batch["labels"]
-        ).sum() / len(batch["labels"])
-        return loss
+        loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
+        loss = loss.sum() / batch["labels"].shape[0]
+        return loss, logits
 
-    grad_fn = jax.grad(loss_fn)
-    grads = grad_fn(state.params, state.constants)
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, logits), grads = grad_fn(state.params, state.constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
+
+    metric_updates = state.metrics.gather_from_model_output(
+        logits=logits,
+        labels=batch["labels"],
+        loss=loss,
+    )
+    metrics = state.metrics.merge(metric_updates)
+    state = state.replace(metrics=metrics)
     return state
 
 
@@ -87,11 +96,12 @@ def eval_step(*, state, batch):
         train=False,
     )
 
-    loss = optax.sigmoid_binary_cross_entropy(
-        logits=logits, labels=batch["labels"]
-    ).sum() / len(batch["labels"])
+    loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
+    loss = loss.sum() / batch["labels"].shape[0]
     metric_updates = state.metrics.gather_from_model_output(
-        logits=logits, labels=batch["labels"], loss=loss
+        logits=logits,
+        labels=batch["labels"],
+        loss=loss,
     )
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
@@ -122,18 +132,18 @@ global_batch_size = batch_size * compute_units
 
 # Dataset params
 image_size = 256
-total_labels = 5407
+total_labels = 5384
 train_samples = 24576
-val_samples = 10240
+val_samples = 11264
 
 # Model hyperparams
 learning_rate = 0.0005
-weight_decay = 0.0
+weight_decay = 0.001
 dropout_rate = 0.1
 
 # Augmentations hyperparams
 noise_level = 2
-mixup_alpha = 0.1
+mixup_alpha = 0.2
 cutout_max_pct = 0.1
 random_resize_method = True
 
@@ -199,8 +209,10 @@ p_eval_step = jax.pmap(eval_step, axis_name="batch")
 metrics_history = {
     "train_loss": [],
     "train_f1score": [],
+    "train_mcc": [],
     "test_loss": [],
     "test_f1score": [],
+    "test_mcc": [],
 }
 
 epochs = 0
@@ -210,10 +222,6 @@ for step, batch in enumerate(train_ds):
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch)
-
-    # aggregate batch metrics
-    state = p_eval_step(state=state, batch=batch)
-
     pbar.update(1)
 
     # one training epoch has passed
@@ -243,12 +251,14 @@ for step, batch in enumerate(train_ds):
         print(
             f"train epoch: {(step+1) // num_steps_per_epoch}, "
             f"loss: {metrics_history['train_loss'][-1]:.04f}, "
-            f"f1score: {metrics_history['train_f1score'][-1]*100:.02f}"
+            f"f1score: {metrics_history['train_f1score'][-1]*100:.02f}, "
+            f"mcc: {metrics_history['train_mcc'][-1]*100:.02f}"
         )
         print(
             f"test epoch: {(step+1) // num_steps_per_epoch}, "
             f"loss: {metrics_history['test_loss'][-1]:.04f}, "
-            f"f1score: {metrics_history['test_f1score'][-1]*100:.02f}"
+            f"f1score: {metrics_history['test_f1score'][-1]*100:.02f}, "
+            f"mcc: {metrics_history['test_mcc'][-1]*100:.02f}"
         )
 
         epochs += 1
