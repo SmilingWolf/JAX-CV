@@ -254,8 +254,10 @@ class DataGenerator:
 
         dataset = dataset.map(
             lambda images, labels: (
-                tf.cast(images, tf.float32) * (1.0 / 127.5) - 1,
-                labels,
+                {
+                    "images": tf.cast(images, tf.float32) * (1.0 / 127.5) - 1,
+                    "labels": labels,
+                }
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
