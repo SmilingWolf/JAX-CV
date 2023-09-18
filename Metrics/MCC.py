@@ -1,5 +1,4 @@
 import flax
-import jax
 import jax.numpy as jnp
 from clu import metrics
 
@@ -7,7 +6,7 @@ from clu import metrics
 @flax.struct.dataclass
 class MCC(metrics.Metric):
     """
-    Computes the micro-averaged Matthews correlation coefficient
+    Computes the Matthews correlation coefficient
     from model outputs 'logits' and 'labels'.
 
     The used formula helps avoiding overflow
@@ -15,7 +14,13 @@ class MCC(metrics.Metric):
     """
 
     @classmethod
-    def with_config(cls, threshold: float, from_logits: bool):
+    def with_config(
+        cls,
+        threshold: float,
+        averaging: str,
+        num_classes: int,
+        from_logits: bool,
+    ):
         @flax.struct.dataclass
         class WithConfig(cls):
             true_positives: jnp.array
@@ -25,11 +30,16 @@ class MCC(metrics.Metric):
 
             @classmethod
             def empty(cls):
+                if averaging == "micro":
+                    shape = (1,)
+                elif averaging == "macro":
+                    shape = (num_classes,)
+
                 return cls(
-                    true_positives=jnp.array(0, jnp.uint32),
-                    true_negatives=jnp.array(0, jnp.uint32),
-                    false_positives=jnp.array(0, jnp.uint32),
-                    false_negatives=jnp.array(0, jnp.uint32),
+                    true_positives=jnp.zeros(shape, dtype=jnp.int32),
+                    true_negatives=jnp.zeros(shape, dtype=jnp.int32),
+                    false_positives=jnp.zeros(shape, dtype=jnp.int32),
+                    false_negatives=jnp.zeros(shape, dtype=jnp.int32),
                 )
 
             @classmethod
@@ -42,11 +52,16 @@ class MCC(metrics.Metric):
                 labels = labels > threshold
                 preds = preds > threshold
 
+                if averaging == "micro":
+                    axis = None
+                elif averaging == "macro":
+                    axis = 0
+
                 return cls(
-                    true_positives=((preds == 1) & (labels == 1)).sum(),
-                    true_negatives=((preds == 0) & (labels == 0)).sum(),
-                    false_positives=((preds == 1) & (labels == 0)).sum(),
-                    false_negatives=((preds == 0) & (labels == 1)).sum(),
+                    true_positives=((preds == 1) & (labels == 1)).sum(axis=axis),
+                    true_negatives=((preds == 0) & (labels == 0)).sum(axis=axis),
+                    false_positives=((preds == 1) & (labels == 0)).sum(axis=axis),
+                    false_negatives=((preds == 0) & (labels == 1)).sum(axis=axis),
                 )
 
             def merge(self, other: metrics.Metric) -> metrics.Metric:
@@ -67,7 +82,9 @@ class MCC(metrics.Metric):
                 S = (self.true_positives + self.false_negatives) / N
                 P = (self.true_positives + self.false_positives) / N
                 numerator = (self.true_positives / N) - (S * P)
-                denominator = jax.lax.rsqrt(S * P * (1 - S) * (1 - P))
-                return numerator * denominator
+                denominator = S * P * (1 - S) * (1 - P)
+                denominator = jnp.maximum(denominator, 1e-12)
+                denominator = jnp.power(denominator, -0.5)
+                return jnp.mean(numerator * denominator)
 
         return WithConfig

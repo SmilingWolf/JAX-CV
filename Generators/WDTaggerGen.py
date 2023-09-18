@@ -12,7 +12,7 @@ class DataGenerator:
     def __init__(
         self,
         records_path,
-        total_labels=2380,
+        num_classes=2380,
         image_size=320,
         batch_size=32,
         noise_level=0,
@@ -29,7 +29,7 @@ class DataGenerator:
         """
 
         self.records_path = records_path
-        self.total_labels = total_labels
+        self.num_classes = num_classes
         self.image_size = image_size
         self.batch_size = batch_size
         self.noise_level = noise_level
@@ -58,7 +58,7 @@ class DataGenerator:
         label_indexes = tf.sparse.to_dense(
             parsed_example["label_indexes"], default_value=0
         )
-        one_hots = tf.one_hot(label_indexes, self.total_labels)
+        one_hots = tf.one_hot(label_indexes, self.num_classes)
         labels = tf.reduce_max(one_hots, axis=0)
         labels = tf.cast(labels, tf.float32)
 

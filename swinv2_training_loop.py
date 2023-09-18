@@ -17,9 +17,9 @@ from Models import SwinV2
 
 @struct.dataclass
 class Metrics(metrics.Collection):
-    loss: metrics.Average.from_output("loss")
-    f1score: F1Score.with_config(threshold=0.5, from_logits=True)
-    mcc: MCC.with_config(threshold=0.5, from_logits=True)
+    loss: metrics.Metric
+    f1score: metrics.Metric
+    mcc: metrics.Metric
 
 
 class TrainState(train_state.TrainState):
@@ -33,6 +33,7 @@ def create_train_state(
     params_key,
     dropout_key,
     target_size: int,
+    num_classes: int,
     learning_rate: float,
     weight_decay: float,
 ):
@@ -46,12 +47,22 @@ def create_train_state(
     params = variables["params"]
     constants = variables["swinv2_constants"]
 
+    loss = metrics.Average.from_output("loss")
+    f1score = F1Score.with_config(threshold=0.5, from_logits=True)
+    mcc = MCC.with_config(
+        threshold=0.5,
+        averaging="macro",
+        num_classes=num_classes,
+        from_logits=True,
+    )
+    collection = Metrics.create(loss=loss, f1score=f1score, mcc=mcc)
+
     tx = optax.adamw(learning_rate, weight_decay=weight_decay)
     return TrainState.create(
         apply_fn=module.apply,
         params=params,
         tx=tx,
-        metrics=Metrics.empty(),
+        metrics=collection.empty(),
         dropout_key=dropout_key,
         constants=constants,
     )
@@ -132,7 +143,7 @@ global_batch_size = batch_size * compute_units
 
 # Dataset params
 image_size = 256
-total_labels = 5384
+num_classes = 5384
 train_samples = 24576
 val_samples = 11264
 
@@ -153,7 +164,7 @@ main_key, params_key, dropout_key = jax.random.split(key=root_key, num=3)
 
 training_generator = DataGenerator(
     "/home/smilingwolf/datasets/record_shards_train/*",
-    total_labels=total_labels,
+    num_classes=num_classes,
     image_size=image_size,
     batch_size=global_batch_size,
     noise_level=noise_level,
@@ -166,7 +177,7 @@ train_ds = create_input_iter(train_ds)
 
 validation_generator = DataGenerator(
     "/home/smilingwolf/datasets/record_shards_val/*",
-    total_labels=total_labels,
+    num_classes=num_classes,
     image_size=image_size,
     batch_size=global_batch_size,
     noise_level=0,
@@ -179,7 +190,7 @@ test_ds = create_input_iter(test_ds)
 
 model = SwinV2.SwinTransformerV2(
     img_size=image_size,
-    num_classes=total_labels,
+    num_classes=num_classes,
     embed_dim=96,
     window_size=8,
     depths=(2, 2, 6, 2),
@@ -197,6 +208,7 @@ state = create_train_state(
     params_key,
     dropout_key,
     image_size,
+    num_classes,
     learning_rate,
     weight_decay,
 )
