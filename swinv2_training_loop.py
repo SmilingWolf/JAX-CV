@@ -10,8 +10,7 @@ from flax.training import train_state
 from tqdm import tqdm
 
 from Generators.WDTaggerGen import DataGenerator
-from Metrics.F1Score import F1Score
-from Metrics.MCC import MCC
+from Metrics.ConfusionMatrix import mcc, f1score
 from Models import SwinV2
 
 
@@ -48,14 +47,19 @@ def create_train_state(
     constants = variables["swinv2_constants"]
 
     loss = metrics.Average.from_output("loss")
-    f1score = F1Score.with_config(threshold=0.5, from_logits=True)
-    mcc = MCC.with_config(
-        threshold=0.5,
+    f1score_metric = f1score(
+        threshold=0.4,
         averaging="macro",
         num_classes=num_classes,
         from_logits=True,
     )
-    collection = Metrics.create(loss=loss, f1score=f1score, mcc=mcc)
+    mcc_metric = mcc(
+        threshold=0.4,
+        averaging="macro",
+        num_classes=num_classes,
+        from_logits=True,
+    )
+    collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
 
     tx = optax.adamw(learning_rate, weight_decay=weight_decay)
     return TrainState.create(
@@ -228,7 +232,7 @@ metrics_history = {
 }
 
 epochs = 0
-num_steps_per_epoch = train_samples // batch_size
+num_steps_per_epoch = train_samples // global_batch_size
 pbar = tqdm(total=num_steps_per_epoch)
 for step, batch in enumerate(train_ds):
     # Run optimization steps over training batches and compute batch metrics
@@ -253,7 +257,7 @@ for step, batch in enumerate(train_ds):
         test_state = state
         for val_step, test_batch in enumerate(test_ds):
             test_state = p_eval_step(state=test_state, batch=test_batch)
-            if val_step == val_samples // batch_size:
+            if val_step == val_samples // global_batch_size:
                 break
 
         merged_metrics = jax_utils.unreplicate(test_state.metrics)
