@@ -169,6 +169,7 @@ dropout_rate = 0.1
 # Augmentations hyperparams
 noise_level = 2
 mixup_alpha = 0.8
+rotation_ratio = 0.125
 cutout_max_pct = 0.1
 random_resize_method = True
 
@@ -183,6 +184,7 @@ training_generator = DataGenerator(
     batch_size=global_batch_size,
     noise_level=noise_level,
     mixup_alpha=mixup_alpha,
+    rotation_ratio=rotation_ratio,
     cutout_max_pct=cutout_max_pct,
     random_resize_method=random_resize_method,
 )

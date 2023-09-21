@@ -17,6 +17,7 @@ class DataGenerator:
         batch_size=32,
         noise_level=0,
         mixup_alpha=0.2,
+        rotation_ratio=0.25,
         cutout_max_pct=0.25,
         random_resize_method=True,
     ):
@@ -34,6 +35,7 @@ class DataGenerator:
         self.batch_size = batch_size
         self.noise_level = noise_level
         self.mixup_alpha = mixup_alpha
+        self.rotation_ratio = rotation_ratio
         self.random_resize_method = random_resize_method
 
         self.cutout_max_pct = cutout_max_pct
@@ -94,7 +96,7 @@ class DataGenerator:
 
         h = tf.cast(h, tf.float32)
         w = tf.cast(w, tf.float32)
-        radians = np.pi * 0.25
+        radians = np.pi * self.rotation_ratio
         radians = tf.random.uniform(shape=(bs,), minval=-radians, maxval=radians)
 
         cos_angles = tf.math.cos(radians)
@@ -283,7 +285,7 @@ class DataGenerator:
         dataset = dataset.batch(self.batch_size, drop_remainder=True)
 
         # Rotation is very slow on CPU. Rotating a batch of resized images is much faster
-        if self.noise_level >= 1:
+        if self.noise_level >= 1 and self.rotation_ratio > 0.0:
             dataset = dataset.map(
                 self.random_rotate,
                 num_parallel_calls=tf.data.AUTOTUNE,
