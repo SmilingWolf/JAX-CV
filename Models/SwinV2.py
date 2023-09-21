@@ -680,3 +680,27 @@ class SwinTransformerV2(linen.Module):
         x = jnp.mean(x, axis=(1,))
         x = self.head(x)
         return x
+
+
+def swinv2_tiny_window8_256(**kwargs):
+    model = partial(
+        SwinTransformerV2,
+        embed_dim=96,
+        window_size=8,
+        depths=(2, 2, 6, 2),
+        num_heads=(3, 6, 12, 24),
+    )
+    model = model(**kwargs)
+    return model
+
+
+def swinv2_base_window8_256(**kwargs):
+    model = partial(
+        SwinTransformerV2,
+        embed_dim=128,
+        window_size=8,
+        depths=(2, 2, 18, 2),
+        num_heads=(4, 8, 16, 32),
+    )
+    model = model(**kwargs)
+    return model

@@ -1,4 +1,5 @@
-from typing import Any
+import argparse
+from typing import Any, Callable, Union
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +11,7 @@ from flax.training import train_state
 from tqdm import tqdm
 
 from Generators.WDTaggerGen import DataGenerator
-from Metrics.ConfusionMatrix import mcc, f1score
+from Metrics.ConfusionMatrix import f1score, mcc
 from Models import SwinV2
 
 
@@ -33,7 +34,7 @@ def create_train_state(
     dropout_key,
     target_size: int,
     num_classes: int,
-    learning_rate: float,
+    learning_rate: Union[float, Callable],
     weight_decay: float,
 ):
     """Creates an initial 'TrainState'."""
@@ -61,7 +62,7 @@ def create_train_state(
     )
     collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
 
-    tx = optax.adamw(learning_rate, weight_decay=weight_decay)
+    tx = optax.lamb(learning_rate, weight_decay=weight_decay)
     return TrainState.create(
         apply_fn=module.apply,
         params=params,
@@ -139,8 +140,17 @@ def create_input_iter(ds):
     return it
 
 
+parser = argparse.ArgumentParser(description="Train a network")
+parser.add_argument(
+    "--learning-rate",
+    default=0.0005,
+    help="Max learning rate",
+    type=float,
+)
+args = parser.parse_args()
+
 # Run params
-num_epochs = 40
+num_epochs = 50
 batch_size = 64
 compute_units = jax.device_count()
 global_batch_size = batch_size * compute_units
@@ -152,13 +162,13 @@ train_samples = 24576
 val_samples = 11264
 
 # Model hyperparams
-learning_rate = 0.0005
-weight_decay = 0.001
+learning_rate = args.learning_rate
+weight_decay = 0.0005
 dropout_rate = 0.1
 
 # Augmentations hyperparams
 noise_level = 2
-mixup_alpha = 0.2
+mixup_alpha = 0.8
 cutout_max_pct = 0.1
 random_resize_method = True
 
@@ -192,13 +202,9 @@ validation_generator = DataGenerator(
 test_ds = validation_generator.genDS()
 test_ds = create_input_iter(test_ds)
 
-model = SwinV2.SwinTransformerV2(
+model = SwinV2.swinv2_tiny_window8_256(
     img_size=image_size,
     num_classes=num_classes,
-    embed_dim=96,
-    window_size=8,
-    depths=(2, 2, 6, 2),
-    num_heads=(3, 6, 12, 24),
     drop_path_rate=dropout_rate,
     dtype=jnp.bfloat16,
 )
@@ -238,6 +244,11 @@ for step, batch in enumerate(train_ds):
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch)
+
+    if step % 32 == 0:
+        merged_metrics = jax_utils.unreplicate(state.metrics)
+        pbar.set_postfix(loss=f"{merged_metrics.loss.compute():.04f}")
+
     pbar.update(1)
 
     # one training epoch has passed

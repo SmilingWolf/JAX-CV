@@ -89,6 +89,41 @@ class DataGenerator:
         )
         return image, labels
 
+    def random_rotate(self, images, labels):
+        bs, h, w, c = tf.unstack(tf.shape(images))
+
+        h = tf.cast(h, tf.float32)
+        w = tf.cast(w, tf.float32)
+        radians = np.pi * 0.25
+        radians = tf.random.uniform(shape=(bs,), minval=-radians, maxval=radians)
+
+        cos_angles = tf.math.cos(radians)
+        sin_angles = tf.math.sin(radians)
+        x_offset = ((w - 1) - (cos_angles * (w - 1) - sin_angles * (h - 1))) / 2.0
+        y_offset = ((h - 1) - (sin_angles * (w - 1) + cos_angles * (h - 1))) / 2.0
+        zeros = tf.zeros((bs,), tf.float32)
+
+        transforms = [
+            cos_angles,
+            -sin_angles,
+            x_offset,
+            sin_angles,
+            cos_angles,
+            y_offset,
+            zeros,
+            zeros,
+        ]
+        transforms = tf.transpose(transforms, (1, 0))
+        images = tf.raw_ops.ImageProjectiveTransformV3(
+            images=images,
+            transforms=transforms,
+            output_shape=[h, w],
+            fill_value=255,
+            interpolation="BILINEAR",
+            fill_mode="CONSTANT",
+        )
+        return images, labels
+
     def resize(self, image, labels):
         if self.random_resize_method:
             # During training mix algos up to make the model a bit more more resilient
@@ -246,6 +281,13 @@ class DataGenerator:
             dataset = dataset.map(self.cutout, num_parallel_calls=tf.data.AUTOTUNE)
 
         dataset = dataset.batch(self.batch_size, drop_remainder=True)
+
+        # Rotation is very slow on CPU. Rotating a batch of resized images is much faster
+        if self.noise_level >= 1:
+            dataset = dataset.map(
+                self.random_rotate,
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
 
         if self.noise_level >= 2 and self.mixup_alpha > 0.0:
             dataset = dataset.map(
