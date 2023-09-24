@@ -143,8 +143,20 @@ def create_input_iter(ds):
 parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
     "--learning-rate",
-    default=0.0005,
+    default=0.001,
     help="Max learning rate",
+    type=float,
+)
+parser.add_argument(
+    "--weight-decay",
+    default=0.0001,
+    help="Weight decay",
+    type=float,
+)
+parser.add_argument(
+    "--rotation-ratio",
+    default=0.0,
+    help="Rotation ratio as a fraction of PI",
     type=float,
 )
 args = parser.parse_args()
@@ -157,19 +169,19 @@ global_batch_size = batch_size * compute_units
 
 # Dataset params
 image_size = 256
-num_classes = 5384
+num_classes = 3794
 train_samples = 24576
 val_samples = 11264
 
 # Model hyperparams
 learning_rate = args.learning_rate
-weight_decay = 0.0005
+weight_decay = args.weight_decay
 dropout_rate = 0.1
 
 # Augmentations hyperparams
 noise_level = 2
 mixup_alpha = 0.8
-rotation_ratio = 0.125
+rotation_ratio = args.rotation_ratio
 cutout_max_pct = 0.1
 random_resize_method = True
 
@@ -215,6 +227,16 @@ model = SwinV2.swinv2_tiny_window8_256(
 #         jax.random.PRNGKey(0), jnp.ones([1, image_size, image_size, 3]), train=False
 #     )
 # )
+
+num_steps_per_epoch = train_samples // global_batch_size
+learning_rate = optax.warmup_cosine_decay_schedule(
+    init_value=learning_rate * 0.1,
+    peak_value=learning_rate,
+    warmup_steps=num_steps_per_epoch * 5,
+    decay_steps=num_steps_per_epoch * (num_epochs - 5),
+    end_value=learning_rate * 0.01,
+)
+
 state = create_train_state(
     model,
     params_key,
@@ -240,7 +262,6 @@ metrics_history = {
 }
 
 epochs = 0
-num_steps_per_epoch = train_samples // global_batch_size
 pbar = tqdm(total=num_steps_per_epoch)
 for step, batch in enumerate(train_ds):
     # Run optimization steps over training batches and compute batch metrics
