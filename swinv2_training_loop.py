@@ -122,6 +122,18 @@ def eval_step(*, state, batch):
 
 parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
+    "--epochs",
+    default=50,
+    help="Number of epochs to train for",
+    type=int,
+)
+parser.add_argument(
+    "--batch-size",
+    default=64,
+    help="Per-device batch size",
+    type=int,
+)
+parser.add_argument(
     "--learning-rate",
     default=0.001,
     help="Max learning rate",
@@ -139,11 +151,17 @@ parser.add_argument(
     help="Rotation ratio as a fraction of PI",
     type=float,
 )
+parser.add_argument(
+    "--cutout-max-pct",
+    default=0.1,
+    help="Max cutout area as a fraction of the total image area",
+    type=float,
+)
 args = parser.parse_args()
 
 # Run params
-num_epochs = 50
-batch_size = 64
+num_epochs = args.epochs
+batch_size = args.batch_size
 compute_units = jax.device_count()
 global_batch_size = batch_size * compute_units
 
@@ -162,7 +180,7 @@ dropout_rate = 0.1
 noise_level = 2
 mixup_alpha = 0.8
 rotation_ratio = args.rotation_ratio
-cutout_max_pct = 0.1
+cutout_max_pct = args.cutout_max_pct
 random_resize_method = True
 
 tf.random.set_seed(0)
@@ -184,6 +202,7 @@ training_generator = DataGenerator(
     random_resize_method=random_resize_method,
 )
 train_ds = training_generator.genDS()
+train_ds = jax_utils.prefetch_to_device(train_ds.as_numpy_iterator(), size=2)
 
 validation_generator = DataGenerator(
     "/home/smilingwolf/datasets/record_shards_val/*",
@@ -197,7 +216,8 @@ validation_generator = DataGenerator(
     cutout_max_pct=0.0,
     random_resize_method=False,
 )
-test_ds = validation_generator.genDS()
+val_ds = validation_generator.genDS()
+val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
 
 model = SwinV2.swinv2_tiny_window8_256(
     img_size=image_size,
@@ -238,13 +258,18 @@ metrics_history = {
     "train_loss": [],
     "train_f1score": [],
     "train_mcc": [],
-    "test_loss": [],
-    "test_f1score": [],
-    "test_mcc": [],
+    "val_loss": [],
+    "val_f1score": [],
+    "val_mcc": [],
 }
 
 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=2, create=True)
+options = orbax.checkpoint.CheckpointManagerOptions(
+    max_to_keep=2,
+    best_fn=lambda metrics: metrics["val_loss"],
+    best_mode="min",
+    create=True,
+)
 checkpoint_manager = orbax.checkpoint.CheckpointManager(
     "/tmp/checkpoints/SwinV2",
     orbax_checkpointer,
@@ -253,7 +278,7 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
 
 epochs = 0
 pbar = tqdm(total=num_steps_per_epoch)
-for step, batch in enumerate(train_ds.as_numpy_iterator()):
+for step, batch in enumerate(train_ds):
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
@@ -277,16 +302,16 @@ for step, batch in enumerate(train_ds.as_numpy_iterator()):
         empty_metrics = jax_utils.replicate(empty_metrics)
         state = state.replace(metrics=empty_metrics)
 
-        # Compute metrics on the test set after each training epoch
-        test_state = state
-        for val_step, test_batch in enumerate(test_ds.as_numpy_iterator()):
-            test_state = p_eval_step(state=test_state, batch=test_batch)
+        # Compute metrics on the validation set after each training epoch
+        val_state = state
+        for val_step, val_batch in enumerate(val_ds):
+            val_state = p_eval_step(state=val_state, batch=val_batch)
             if val_step == val_samples // global_batch_size:
                 break
 
-        test_state = jax_utils.unreplicate(test_state)
-        for metric, value in test_state.metrics.compute().items():
-            metrics_history[f"test_{metric}"].append(value)
+        val_state = jax_utils.unreplicate(val_state)
+        for metric, value in val_state.metrics.compute().items():
+            metrics_history[f"val_{metric}"].append(value)
 
         print(
             f"train epoch: {(step+1) // num_steps_per_epoch}, "
@@ -295,15 +320,20 @@ for step, batch in enumerate(train_ds.as_numpy_iterator()):
             f"mcc: {metrics_history['train_mcc'][-1]*100:.02f}"
         )
         print(
-            f"test epoch: {(step+1) // num_steps_per_epoch}, "
-            f"loss: {metrics_history['test_loss'][-1]:.04f}, "
-            f"f1score: {metrics_history['test_f1score'][-1]*100:.02f}, "
-            f"mcc: {metrics_history['test_mcc'][-1]*100:.02f}"
+            f"val epoch: {(step+1) // num_steps_per_epoch}, "
+            f"loss: {metrics_history['val_loss'][-1]:.04f}, "
+            f"f1score: {metrics_history['val_f1score'][-1]*100:.02f}, "
+            f"mcc: {metrics_history['val_mcc'][-1]*100:.02f}"
         )
 
-        ckpt = {"model": test_state}
+        ckpt = {"model": val_state, "metrics_history": metrics_history}
         save_args = orbax_utils.save_args_from_target(ckpt)
-        checkpoint_manager.save(epochs, ckpt, save_kwargs={"save_args": save_args})
+        checkpoint_manager.save(
+            epochs,
+            ckpt,
+            save_kwargs={"save_args": save_args},
+            metrics={"val_loss": float(metrics_history["val_loss"][-1])},
+        )
 
         epochs += 1
         if epochs == num_epochs:
