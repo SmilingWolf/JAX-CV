@@ -15,6 +15,7 @@ class DataGenerator:
         num_classes=2380,
         image_size=320,
         batch_size=32,
+        num_devices=0,
         noise_level=0,
         mixup_alpha=0.2,
         rotation_ratio=0.25,
@@ -33,6 +34,7 @@ class DataGenerator:
         self.num_classes = num_classes
         self.image_size = image_size
         self.batch_size = batch_size
+        self.num_devices = num_devices
         self.noise_level = noise_level
         self.mixup_alpha = mixup_alpha
         self.rotation_ratio = rotation_ratio
@@ -296,6 +298,9 @@ class DataGenerator:
                 self.mixup_single,
                 num_parallel_calls=tf.data.AUTOTUNE,
             )
+
+        if self.num_devices > 0:
+            dataset = dataset.batch(self.num_devices, drop_remainder=True)
 
         dataset = dataset.map(
             lambda images, labels: (

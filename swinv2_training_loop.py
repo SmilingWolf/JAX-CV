@@ -4,10 +4,11 @@ from typing import Any, Callable, Union
 import jax
 import jax.numpy as jnp
 import optax
+import orbax.checkpoint
 import tensorflow as tf
 from clu import metrics
 from flax import jax_utils, struct
-from flax.training import train_state
+from flax.training import orbax_utils, train_state
 from tqdm import tqdm
 
 from Generators.WDTaggerGen import DataGenerator
@@ -24,14 +25,12 @@ class Metrics(metrics.Collection):
 
 class TrainState(train_state.TrainState):
     metrics: Metrics
-    dropout_key: Any
     constants: Any
 
 
 def create_train_state(
     module,
     params_key,
-    dropout_key,
     target_size: int,
     num_classes: int,
     learning_rate: Union[float, Callable],
@@ -68,15 +67,13 @@ def create_train_state(
         params=params,
         tx=tx,
         metrics=collection.empty(),
-        dropout_key=dropout_key,
         constants=constants,
     )
 
 
-@jax.jit
-def train_step(state, batch):
+def train_step(state, batch, dropout_key):
     """Train for a single step."""
-    dropout_train_key = jax.random.fold_in(key=state.dropout_key, data=state.step)
+    dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
     def loss_fn(params, constants):
         logits = state.apply_fn(
@@ -104,7 +101,6 @@ def train_step(state, batch):
     return state
 
 
-@jax.jit
 def eval_step(*, state, batch):
     logits = state.apply_fn(
         {"params": state.params, "swinv2_constants": state.constants},
@@ -122,22 +118,6 @@ def eval_step(*, state, batch):
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
     return state
-
-
-def prepare_tf_data(xs):
-    local_device_count = jax.local_device_count()
-
-    def _prepare(x):
-        x = x._numpy()
-        return x.reshape((local_device_count, -1) + x.shape[1:])
-
-    return jax.tree_util.tree_map(_prepare, xs)
-
-
-def create_input_iter(ds):
-    it = map(prepare_tf_data, ds)
-    it = jax_utils.prefetch_to_device(it, 2)
-    return it
 
 
 parser = argparse.ArgumentParser(description="Train a network")
@@ -186,14 +166,17 @@ cutout_max_pct = 0.1
 random_resize_method = True
 
 tf.random.set_seed(0)
-root_key = jax.random.PRNGKey(0)
-main_key, params_key, dropout_key = jax.random.split(key=root_key, num=3)
+root_key = jax.random.key(0)
+params_key, dropout_key = jax.random.split(key=root_key, num=2)
+dropout_keys = jax.random.split(key=dropout_key, num=jax.device_count())
+del root_key
 
 training_generator = DataGenerator(
     "/home/smilingwolf/datasets/record_shards_train/*",
     num_classes=num_classes,
     image_size=image_size,
-    batch_size=global_batch_size,
+    batch_size=batch_size,
+    num_devices=compute_units,
     noise_level=noise_level,
     mixup_alpha=mixup_alpha,
     rotation_ratio=rotation_ratio,
@@ -201,20 +184,20 @@ training_generator = DataGenerator(
     random_resize_method=random_resize_method,
 )
 train_ds = training_generator.genDS()
-train_ds = create_input_iter(train_ds)
 
 validation_generator = DataGenerator(
     "/home/smilingwolf/datasets/record_shards_val/*",
     num_classes=num_classes,
     image_size=image_size,
-    batch_size=global_batch_size,
+    batch_size=batch_size,
+    num_devices=compute_units,
     noise_level=0,
     mixup_alpha=0.0,
+    rotation_ratio=0.0,
     cutout_max_pct=0.0,
     random_resize_method=False,
 )
 test_ds = validation_generator.genDS()
-test_ds = create_input_iter(test_ds)
 
 model = SwinV2.swinv2_tiny_window8_256(
     img_size=image_size,
@@ -224,7 +207,7 @@ model = SwinV2.swinv2_tiny_window8_256(
 )
 # print(
 #     model.tabulate(
-#         jax.random.PRNGKey(0), jnp.ones([1, image_size, image_size, 3]), train=False
+#         jax.random.key(0), jnp.ones([1, image_size, image_size, 3]), train=False
 #     )
 # )
 
@@ -240,7 +223,6 @@ learning_rate = optax.warmup_cosine_decay_schedule(
 state = create_train_state(
     model,
     params_key,
-    dropout_key,
     image_size,
     num_classes,
     learning_rate,
@@ -261,12 +243,20 @@ metrics_history = {
     "test_mcc": [],
 }
 
+orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=2, create=True)
+checkpoint_manager = orbax.checkpoint.CheckpointManager(
+    "/tmp/checkpoints/SwinV2",
+    orbax_checkpointer,
+    options,
+)
+
 epochs = 0
 pbar = tqdm(total=num_steps_per_epoch)
-for step, batch in enumerate(train_ds):
+for step, batch in enumerate(train_ds.as_numpy_iterator()):
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
-    state = p_train_step(state=state, batch=batch)
+    state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
 
     if step % 32 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
@@ -289,13 +279,13 @@ for step, batch in enumerate(train_ds):
 
         # Compute metrics on the test set after each training epoch
         test_state = state
-        for val_step, test_batch in enumerate(test_ds):
+        for val_step, test_batch in enumerate(test_ds.as_numpy_iterator()):
             test_state = p_eval_step(state=test_state, batch=test_batch)
             if val_step == val_samples // global_batch_size:
                 break
 
-        merged_metrics = jax_utils.unreplicate(test_state.metrics)
-        for metric, value in merged_metrics.compute().items():
+        test_state = jax_utils.unreplicate(test_state)
+        for metric, value in test_state.metrics.compute().items():
             metrics_history[f"test_{metric}"].append(value)
 
         print(
@@ -310,6 +300,10 @@ for step, batch in enumerate(train_ds):
             f"f1score: {metrics_history['test_f1score'][-1]*100:.02f}, "
             f"mcc: {metrics_history['test_mcc'][-1]*100:.02f}"
         )
+
+        ckpt = {"model": test_state}
+        save_args = orbax_utils.save_args_from_target(ckpt)
+        checkpoint_manager.save(epochs, ckpt, save_kwargs={"save_args": save_args})
 
         epochs += 1
         if epochs == num_epochs:
