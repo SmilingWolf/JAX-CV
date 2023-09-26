@@ -181,13 +181,12 @@ class DataGenerator:
         Returns:
           An image Tensor that is of type uint8.
         """
-        max_pct = self.cutout_max_pct
+        pad_pct = self.cutout_max_pct
         replace = self.cutout_replace
 
         image_height = tf.shape(image)[0]
         image_width = tf.shape(image)[1]
 
-        pad_pct = tf.random.uniform((), minval=0, maxval=max_pct)
         img_area = image_height * image_width
         pad_area = tf.cast(img_area, dtype=tf.float32) * pad_pct
         pad_size = tf.cast(tf.math.sqrt(pad_area) / 2, dtype=tf.int32)

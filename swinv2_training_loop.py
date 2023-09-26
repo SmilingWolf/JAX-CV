@@ -61,7 +61,13 @@ def create_train_state(
     )
     collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
 
-    tx = optax.lamb(learning_rate, weight_decay=weight_decay)
+    def should_decay(path, _):
+        is_kernel = path[-1].key == "kernel"
+        is_cpb = "attention_bias" in [x.key for x in path]
+        return is_kernel and not is_cpb
+
+    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
+    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
     return TrainState.create(
         apply_fn=module.apply,
         params=params,
@@ -146,6 +152,12 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
+    "--mixup-alpha",
+    default=0.8,
+    help="MixUp alpha (wow much explanation, so clear)",
+    type=float,
+)
+parser.add_argument(
     "--rotation-ratio",
     default=0.0,
     help="Rotation ratio as a fraction of PI",
@@ -154,7 +166,7 @@ parser.add_argument(
 parser.add_argument(
     "--cutout-max-pct",
     default=0.1,
-    help="Max cutout area as a fraction of the total image area",
+    help="Cutout area as a fraction of the total image area",
     type=float,
 )
 args = parser.parse_args()
@@ -178,7 +190,7 @@ dropout_rate = 0.1
 
 # Augmentations hyperparams
 noise_level = 2
-mixup_alpha = 0.8
+mixup_alpha = args.mixup_alpha
 rotation_ratio = args.rotation_ratio
 cutout_max_pct = args.cutout_max_pct
 random_resize_method = True
@@ -187,7 +199,7 @@ tf.random.set_seed(0)
 root_key = jax.random.key(0)
 params_key, dropout_key = jax.random.split(key=root_key, num=2)
 dropout_keys = jax.random.split(key=dropout_key, num=jax.device_count())
-del root_key
+del root_key, dropout_key
 
 training_generator = DataGenerator(
     "/home/smilingwolf/datasets/record_shards_train/*",
