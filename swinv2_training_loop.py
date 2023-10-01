@@ -248,7 +248,7 @@ learning_rate = optax.warmup_cosine_decay_schedule(
     init_value=learning_rate * 0.1,
     peak_value=learning_rate,
     warmup_steps=num_steps_per_epoch * 5,
-    decay_steps=num_steps_per_epoch * (num_epochs - 5),
+    decay_steps=num_steps_per_epoch * num_epochs,
     end_value=learning_rate * 0.01,
 )
 
