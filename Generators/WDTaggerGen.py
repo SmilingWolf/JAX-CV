@@ -42,6 +42,7 @@ class DataGenerator:
 
         self.cutout_max_pct = cutout_max_pct
         self.cutout_replace = 127
+        self.cutout_patches = 1
 
     def parse_single_record(self, example_proto):
         feature_description = {
@@ -281,7 +282,8 @@ class DataGenerator:
         dataset = dataset.map(self.resize, num_parallel_calls=tf.data.AUTOTUNE)
 
         if self.noise_level >= 2 and self.cutout_max_pct > 0.0:
-            dataset = dataset.map(self.cutout, num_parallel_calls=tf.data.AUTOTUNE)
+            for _ in range(self.cutout_patches):
+                dataset = dataset.map(self.cutout, num_parallel_calls=tf.data.AUTOTUNE)
 
         dataset = dataset.batch(self.batch_size, drop_remainder=True)
 
