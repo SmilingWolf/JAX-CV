@@ -262,10 +262,6 @@ state = create_train_state(
 )
 del params_key
 
-state = jax_utils.replicate(state)
-p_train_step = jax.pmap(train_step, axis_name="batch")
-p_eval_step = jax.pmap(eval_step, axis_name="batch")
-
 metrics_history = {
     "train_loss": [],
     "train_f1score": [],
@@ -288,6 +284,19 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
+latest_epoch = checkpoint_manager.latest_step()
+if latest_epoch is not None:
+    ckpt = {"model": state, "metrics_history": metrics_history}
+    restored = checkpoint_manager.restore(latest_epoch, items=ckpt)
+    state = state.replace(params=restored["model"].params)
+    metrics_history = restored["metrics_history"]
+else:
+    latest_epoch = 0
+
+state = jax_utils.replicate(state)
+p_train_step = jax.pmap(train_step, axis_name="batch")
+p_eval_step = jax.pmap(eval_step, axis_name="batch")
+
 epochs = 0
 pbar = tqdm(total=num_steps_per_epoch)
 for step, batch in enumerate(train_ds):
@@ -295,7 +304,7 @@ for step, batch in enumerate(train_ds):
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
 
-    if step % 32 == 0:
+    if step % 192 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
         pbar.set_postfix(loss=f"{merged_metrics.loss.compute():.04f}")
 
@@ -341,7 +350,7 @@ for step, batch in enumerate(train_ds):
         ckpt = {"model": val_state, "metrics_history": metrics_history}
         save_args = orbax_utils.save_args_from_target(ckpt)
         checkpoint_manager.save(
-            epochs,
+            epochs + latest_epoch,
             ckpt,
             save_kwargs={"save_args": save_args},
             metrics={"val_loss": float(metrics_history["val_loss"][-1])},
