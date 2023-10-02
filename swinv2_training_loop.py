@@ -159,6 +159,12 @@ parser.add_argument(
     type=int,
 )
 parser.add_argument(
+    "--image-size",
+    default=256,
+    help="Image resolution in input to the network",
+    type=int,
+)
+parser.add_argument(
     "--learning-rate",
     default=0.001,
     help="Max learning rate",
@@ -179,7 +185,7 @@ parser.add_argument(
 parser.add_argument(
     "--mixup-alpha",
     default=0.8,
-    help="MixUp alpha (wow much explanation, so clear)",
+    help="MixUp alpha",
     type=float,
 )
 parser.add_argument(
@@ -208,12 +214,14 @@ compute_units = jax.device_count()
 global_batch_size = batch_size * compute_units
 
 # Dataset params
-image_size = 256
+image_size = args.image_size
 num_classes = dataset_specs["num_classes"]
 train_samples = dataset_specs["train_samples"]
 val_samples = dataset_specs["val_samples"]
 
 # Model hyperparams
+window_ratio = 32
+window_size = image_size // window_ratio
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
 dropout_rate = args.dropout_rate
@@ -264,6 +272,7 @@ val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
 model = SwinV2.swinv2_tiny_window8_256(
     img_size=image_size,
     num_classes=num_classes,
+    window_size=window_size,
     drop_path_rate=dropout_rate,
     dtype=jnp.bfloat16,
 )
