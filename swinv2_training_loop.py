@@ -1,4 +1,5 @@
 import argparse
+import json
 from typing import Any, Callable, Union
 
 import jax
@@ -128,6 +129,24 @@ def eval_step(*, state, batch):
 
 parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
+    "--dataset-file",
+    default="datasets/aibooru.json",
+    help="JSON file with dataset specs",
+    type=str,
+)
+parser.add_argument(
+    "--dataset-root",
+    default="/home/smilingwolf/datasets",
+    help="Dataset root, where the record_shards_train and record_shards_val folders are stored",
+    type=str,
+)
+parser.add_argument(
+    "--checkpoints-root",
+    default="/tmp/checkpoints/checkpoints",
+    help="Checkpoints root, where the checkpoints will be stored following a <ckpt_root>/<network_name>/<epoch> structure",
+    type=str,
+)
+parser.add_argument(
     "--epochs",
     default=50,
     help="Number of epochs to train for",
@@ -152,6 +171,12 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
+    "--dropout-rate",
+    default=0.1,
+    help="Stochastic depth rate",
+    type=float,
+)
+parser.add_argument(
     "--mixup-alpha",
     default=0.8,
     help="MixUp alpha (wow much explanation, so clear)",
@@ -171,6 +196,11 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+checkpoints_root = args.checkpoints_root
+dataset_root = args.dataset_root
+with open(args.dataset_file) as f:
+    dataset_specs = json.load(f)
+
 # Run params
 num_epochs = args.epochs
 batch_size = args.batch_size
@@ -179,14 +209,14 @@ global_batch_size = batch_size * compute_units
 
 # Dataset params
 image_size = 256
-num_classes = 3794
-train_samples = 24576
-val_samples = 11264
+num_classes = dataset_specs["num_classes"]
+train_samples = dataset_specs["train_samples"]
+val_samples = dataset_specs["val_samples"]
 
 # Model hyperparams
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
-dropout_rate = 0.1
+dropout_rate = args.dropout_rate
 
 # Augmentations hyperparams
 noise_level = 2
@@ -202,7 +232,7 @@ dropout_keys = jax.random.split(key=dropout_key, num=jax.device_count())
 del root_key, dropout_key
 
 training_generator = DataGenerator(
-    "/home/smilingwolf/datasets/record_shards_train/*",
+    f"{dataset_root}/record_shards_train/*",
     num_classes=num_classes,
     image_size=image_size,
     batch_size=batch_size,
@@ -217,7 +247,7 @@ train_ds = training_generator.genDS()
 train_ds = jax_utils.prefetch_to_device(train_ds.as_numpy_iterator(), size=2)
 
 validation_generator = DataGenerator(
-    "/home/smilingwolf/datasets/record_shards_val/*",
+    f"{dataset_root}/record_shards_val/*",
     num_classes=num_classes,
     image_size=image_size,
     batch_size=batch_size,
@@ -279,7 +309,7 @@ options = orbax.checkpoint.CheckpointManagerOptions(
     create=True,
 )
 checkpoint_manager = orbax.checkpoint.CheckpointManager(
-    "/tmp/checkpoints/SwinV2",
+    f"{checkpoints_root}/SwinV2",
     orbax_checkpointer,
     options,
 )
