@@ -142,7 +142,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--checkpoints-root",
-    default="/tmp/checkpoints/checkpoints",
+    default="/tmp/checkpoints",
     help="Checkpoints root, where the checkpoints will be stored following a <ckpt_root>/<network_name>/<epoch> structure",
     type=str,
 )

@@ -61,7 +61,8 @@ class DataGenerator:
         # Nel TFRecord mettiamo solo gli indici per questioni di spazio
         # Emula MultiLabelBinarizer a partire dagli indici per ottenere un tensor di soli 0 e 1
         label_indexes = tf.sparse.to_dense(
-            parsed_example["label_indexes"], default_value=0
+            parsed_example["label_indexes"],
+            default_value=0,
         )
         one_hots = tf.one_hot(label_indexes, self.num_classes)
         labels = tf.reduce_max(one_hots, axis=0)
@@ -84,13 +85,23 @@ class DataGenerator:
         new_height = new_width = tf.cast(tf.cast(height, tf.float32) * factor, tf.int32)
 
         offset_height = tf.random.uniform(
-            shape=[], minval=0, maxval=(height - new_height), dtype=tf.int32
+            shape=[],
+            minval=0,
+            maxval=(height - new_height),
+            dtype=tf.int32,
         )
         offset_width = tf.random.uniform(
-            shape=[], minval=0, maxval=(width - new_width), dtype=tf.int32
+            shape=[],
+            minval=0,
+            maxval=(width - new_width),
+            dtype=tf.int32,
         )
         image = tf.image.crop_to_bounding_box(
-            image, offset_height, offset_width, new_height, new_width
+            image,
+            offset_height,
+            offset_width,
+            new_height,
+            new_width,
         )
         return image, labels
 
@@ -285,7 +296,11 @@ class DataGenerator:
             for _ in range(self.cutout_patches):
                 dataset = dataset.map(self.cutout, num_parallel_calls=tf.data.AUTOTUNE)
 
-        dataset = dataset.batch(self.batch_size, drop_remainder=True)
+        dataset = dataset.batch(
+            self.batch_size,
+            drop_remainder=True,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
 
         # Rotation is very slow on CPU. Rotating a batch of resized images is much faster
         if self.noise_level >= 1 and self.rotation_ratio > 0.0:
@@ -301,7 +316,11 @@ class DataGenerator:
             )
 
         if self.num_devices > 0:
-            dataset = dataset.batch(self.num_devices, drop_remainder=True)
+            dataset = dataset.batch(
+                self.num_devices,
+                drop_remainder=True,
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
 
         dataset = dataset.map(
             lambda images, labels: (
