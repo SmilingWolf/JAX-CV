@@ -142,6 +142,12 @@ parser.add_argument(
     type=str,
 )
 parser.add_argument(
+    "--restore-params-ckpt",
+    default=None,
+    help="Restore the parameters from the last step of the given orbax checkpoint. Must be an absolute path. WARNING: restores params only!",
+    type=str,
+)
+parser.add_argument(
     "--dataset-file",
     default="datasets/aibooru.json",
     help="JSON file with dataset specs",
@@ -163,6 +169,12 @@ parser.add_argument(
     "--epochs",
     default=50,
     help="Number of epochs to train for",
+    type=int,
+)
+parser.add_argument(
+    "--warmup-epochs",
+    default=5,
+    help="Number of epochs to dedicate to linear warmup",
     type=int,
 )
 parser.add_argument(
@@ -213,6 +225,12 @@ parser.add_argument(
     help="Cutout area as a fraction of the total image area",
     type=float,
 )
+parser.add_argument(
+    "--cutout-patches",
+    default=1,
+    help="Number of cutout patches",
+    type=int,
+)
 args = parser.parse_args()
 
 model_name = args.model_name
@@ -231,6 +249,7 @@ with open(args.dataset_file) as f:
 
 # Run params
 num_epochs = args.epochs
+warmup_epochs = args.warmup_epochs
 batch_size = args.batch_size
 compute_units = jax.device_count()
 global_batch_size = batch_size * compute_units
@@ -253,6 +272,7 @@ noise_level = 2
 mixup_alpha = args.mixup_alpha
 rotation_ratio = args.rotation_ratio
 cutout_max_pct = args.cutout_max_pct
+cutout_patches = args.cutout_patches
 random_resize_method = True
 
 tf.random.set_seed(0)
@@ -271,6 +291,7 @@ training_generator = DataGenerator(
     mixup_alpha=mixup_alpha,
     rotation_ratio=rotation_ratio,
     cutout_max_pct=cutout_max_pct,
+    cutout_patches=cutout_patches,
     random_resize_method=random_resize_method,
 )
 train_ds = training_generator.genDS()
@@ -308,7 +329,7 @@ num_steps_per_epoch = train_samples // global_batch_size
 learning_rate = optax.warmup_cosine_decay_schedule(
     init_value=learning_rate * 0.1,
     peak_value=learning_rate,
-    warmup_steps=num_steps_per_epoch * 5,
+    warmup_steps=num_steps_per_epoch * warmup_epochs,
     decay_steps=num_steps_per_epoch * num_epochs,
     end_value=learning_rate * 0.01,
 )
@@ -331,6 +352,7 @@ metrics_history = {
     "val_f1score": [],
     "val_mcc": [],
 }
+ckpt = {"model": state, "metrics_history": metrics_history}
 
 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 options = orbax.checkpoint.CheckpointManagerOptions(
@@ -345,9 +367,18 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
+if args.restore_params_ckpt is not None:
+    throwaway_manager = orbax.checkpoint.CheckpointManager(
+        args.restore_params_ckpt,
+        orbax_checkpointer,
+    )
+    latest_epoch = throwaway_manager.latest_step()
+    restored = throwaway_manager.restore(latest_epoch, items=ckpt)
+    state = state.replace(params=restored["model"].params)
+    del throwaway_manager
+
 latest_epoch = checkpoint_manager.latest_step()
 if latest_epoch is not None:
-    ckpt = {"model": state, "metrics_history": metrics_history}
     restored = checkpoint_manager.restore(latest_epoch, items=ckpt)
     state = state.replace(params=restored["model"].params)
     metrics_history = restored["metrics_history"]
@@ -408,7 +439,8 @@ for step, batch in enumerate(train_ds):
             f"mcc: {metrics_history['val_mcc'][-1]*100:.02f}"
         )
 
-        ckpt = {"model": val_state, "metrics_history": metrics_history}
+        ckpt["model"] = val_state
+        ckpt["metrics_history"] = metrics_history
         save_args = orbax_utils.save_args_from_target(ckpt)
         checkpoint_manager.save(
             epochs + latest_epoch,
