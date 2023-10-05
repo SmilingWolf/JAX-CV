@@ -20,6 +20,7 @@ class DataGenerator:
         mixup_alpha=0.2,
         rotation_ratio=0.25,
         cutout_max_pct=0.25,
+        cutout_patches=1,
         random_resize_method=True,
     ):
         """
@@ -42,7 +43,7 @@ class DataGenerator:
 
         self.cutout_max_pct = cutout_max_pct
         self.cutout_replace = 127
-        self.cutout_patches = 1
+        self.cutout_patches = cutout_patches
 
     def parse_single_record(self, example_proto):
         feature_description = {
