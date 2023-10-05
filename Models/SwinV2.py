@@ -18,7 +18,7 @@ class MLP(linen.Module):
         out_dim = x.shape[-1]
 
         x = linen.Dense(self.hidden_features, dtype=self.dtype)(x)
-        x = linen.gelu(x)
+        x = self.act_layer(x)
         x = linen.Dropout(self.drop_ratio, deterministic=not train)(x)
         x = linen.Dense(out_dim, dtype=self.dtype)(x)
         x = linen.Dropout(self.drop_ratio, deterministic=not train)(x)
@@ -223,8 +223,6 @@ class WindowAttention(linen.Module):
         qkv = jnp.transpose(qkv, (2, 0, 3, 1, 4))
         q, k, v = (qkv[0], qkv[1], qkv[2])
 
-        # q_norm = q / jnp.linalg.norm(q, ord=2, axis=-1, keepdims=True)
-        # k_norm = k / jnp.linalg.norm(k, ord=2, axis=-1, keepdims=True)
         q_norm = l2_normalize(q)
         k_norm = l2_normalize(k)
         attn = q_norm @ jnp.transpose(k_norm, (0, 1, 3, 2))
@@ -568,7 +566,7 @@ class PatchEmbed(linen.Module):
 
 class SwinTransformerV2(linen.Module):
     r"""Swin Transformer
-        A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
+        A JAX/Flax impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
           https://arxiv.org/pdf/2103.14030
 
     Args:
