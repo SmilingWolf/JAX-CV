@@ -665,7 +665,11 @@ class SwinTransformerV2(linen.Module):
         self.swin_body = swin_body
 
         self.norm = norm_layer()
-        self.head = linen.Dense(self.num_classes, dtype=self.dtype)
+        self.head = (
+            linen.Dense(self.num_classes, dtype=self.dtype)
+            if self.num_classes > 0
+            else lambda x: x
+        )
 
     def __call__(self, x, train: bool = False):
         x = self.patch_embed(x)
