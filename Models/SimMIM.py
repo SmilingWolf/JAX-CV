@@ -7,7 +7,48 @@ from flax import linen
 from .SwinV2 import SwinTransformerV2
 
 
-class SwinTransformerForSimMIM(SwinTransformerV2):
+def norm_targets(targets, patch_size):
+    window_shape = (patch_size, patch_size)
+    padding = ((patch_size // 2, patch_size // 2), (patch_size // 2, patch_size // 2))
+
+    targets_ = targets
+    targets_count = jnp.ones_like(targets)
+
+    targets_square = jnp.power(targets, 2.0)
+
+    targets_mean = linen.avg_pool(
+        targets,
+        window_shape=window_shape,
+        strides=(1, 1),
+        padding=padding,
+        count_include_pad=False,
+    )
+    targets_square_mean = linen.avg_pool(
+        targets_square,
+        window_shape=window_shape,
+        strides=(1, 1),
+        padding=padding,
+        count_include_pad=False,
+    )
+    targets_count = linen.avg_pool(
+        targets_count,
+        window_shape=window_shape,
+        strides=(1, 1),
+        padding=padding,
+        count_include_pad=True,
+    )
+    targets_count = targets_count * jnp.power(patch_size, 2.0)
+
+    targets_var = targets_square_mean - jnp.power(targets_mean, 2.0)
+    targets_var = targets_var * (targets_count / (targets_count - 1))
+    targets_var = jnp.maximum(targets_var, 0.0)
+
+    targets_ = (targets_ - targets_mean) / jnp.sqrt(targets_var + 1.0e-6)
+
+    return targets_
+
+
+class SwinTransformerV2ForSimMIM(SwinTransformerV2):
     def setup(self):
         super().setup()
 
@@ -22,6 +63,8 @@ class SwinTransformerForSimMIM(SwinTransformerV2):
         mask_tokens = jnp.broadcast_to(self.mask_token, (B, L, self.embed_dim))
         mask = jnp.reshape(mask, (B, L, 1)).astype(mask_tokens.dtype)
         x = x * (1.0 - mask) + mask_tokens * mask
+
+        x = self.pos_drop(x, deterministic=not train)
 
         for layer in self.swin_body:
             x = layer(x, train=train)
@@ -40,6 +83,9 @@ class SimMIM(linen.Module):
 
     patch_size: int
     in_chans: int = 3
+
+    norm_targets_enabled: bool = True
+    norm_patch_size: int = 47
 
     def setup(self):
         self.decoder = linen.Sequential(
@@ -66,6 +112,10 @@ class SimMIM(linen.Module):
             ),
             axis=-1,
         )
+
+        if self.norm_targets_enabled:
+            x = norm_targets(x, self.norm_patch_size)
+
         loss_recon = jnp.abs(x - x_rec)
         loss = jnp.sum(loss_recon * mask) / (jnp.sum(mask) + 1e-5) / self.in_chans
 
@@ -74,7 +124,7 @@ class SimMIM(linen.Module):
 
 def simmim_swinv2_tiny_window8_256(**kwargs):
     encoder = partial(
-        SwinTransformerForSimMIM,
+        SwinTransformerV2ForSimMIM,
         embed_dim=96,
         window_size=8,
         depths=(2, 2, 6, 2),
@@ -87,7 +137,7 @@ def simmim_swinv2_tiny_window8_256(**kwargs):
 
 def simmim_swinv2_base_window8_256(**kwargs):
     encoder = partial(
-        SwinTransformerForSimMIM,
+        SwinTransformerV2ForSimMIM,
         embed_dim=128,
         window_size=8,
         depths=(2, 2, 18, 2),

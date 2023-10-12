@@ -233,7 +233,7 @@ global_batch_size = batch_size * compute_units
 
 # Dataset params
 image_size = args.image_size
-num_classes = dataset_specs["num_classes"]
+num_classes = 0 #dataset_specs["num_classes"]
 train_samples = dataset_specs["train_samples"]
 val_samples = dataset_specs["val_samples"]
 
