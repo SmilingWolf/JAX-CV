@@ -1,4 +1,5 @@
 from functools import partial
+from typing import Tuple
 
 import einops
 import jax.numpy as jnp
@@ -7,45 +8,73 @@ from flax import linen
 from .SwinV2 import SwinTransformerV2
 
 
-def norm_targets(targets, patch_size):
-    window_shape = (patch_size, patch_size)
-    padding = ((patch_size // 2, patch_size // 2), (patch_size // 2, patch_size // 2))
+class WindowedNorm(linen.Module):
+    target_size: Tuple[int]
+    window_size: int = 47
 
-    targets_ = targets
-    targets_count = jnp.ones_like(targets)
+    def get_targets_count(self):
+        window_shape = (self.window_size, self.window_size)
+        padding = (
+            (self.window_size // 2, self.window_size // 2),
+            (self.window_size // 2, self.window_size // 2),
+        )
 
-    targets_square = jnp.power(targets, 2.0)
+        targets_count = jnp.ones((1, self.target_size[0], self.target_size[1], 1))
 
-    targets_mean = linen.avg_pool(
-        targets,
-        window_shape=window_shape,
-        strides=(1, 1),
-        padding=padding,
-        count_include_pad=False,
-    )
-    targets_square_mean = linen.avg_pool(
-        targets_square,
-        window_shape=window_shape,
-        strides=(1, 1),
-        padding=padding,
-        count_include_pad=False,
-    )
-    targets_count = linen.avg_pool(
-        targets_count,
-        window_shape=window_shape,
-        strides=(1, 1),
-        padding=padding,
-        count_include_pad=True,
-    )
-    targets_count = targets_count * jnp.power(patch_size, 2.0)
+        targets_count = linen.avg_pool(
+            targets_count,
+            window_shape=window_shape,
+            strides=(1, 1),
+            padding=padding,
+            count_include_pad=True,
+        )
+        targets_count = targets_count * jnp.power(self.window_size, 2.0)
+        targets_count = jnp.int32(jnp.rint(targets_count))
+        return targets_count
 
-    targets_var = targets_square_mean - jnp.power(targets_mean, 2.0)
-    targets_var = targets_var * (targets_count / (targets_count - 1))
-    targets_var = jnp.maximum(targets_var, 0.0)
+    def setup(self):
+        self.targets_count = self.variable(
+            "simmim_constants",
+            "targets_count",
+            self.get_targets_count,
+        ).value
 
-    targets_ = (targets_ - targets_mean) / jnp.sqrt(targets_var + 1.0e-6)
+    def __call__(self, targets):
+        B, H, W, C = targets.shape
+        window_size = self.window_size
 
-    return targets_
+        window_shape = (window_size, window_size)
+        padding = (
+            (window_size // 2, window_size // 2),
+            (window_size // 2, window_size // 2),
+        )
+
+        targets_ = targets
+
+        targets_square = jnp.power(targets, 2.0)
+
+        targets_mean = linen.avg_pool(
+            targets,
+            window_shape=window_shape,
+            strides=(1, 1),
+            padding=padding,
+            count_include_pad=False,
+        )
+        targets_square_mean = linen.avg_pool(
+            targets_square,
+            window_shape=window_shape,
+            strides=(1, 1),
+            padding=padding,
+            count_include_pad=False,
+        )
+
+        targets_var = targets_square_mean - jnp.power(targets_mean, 2.0)
+        targets_var = targets_var * (self.targets_count / (self.targets_count - 1))
+        targets_var = jnp.maximum(targets_var, 0.0)
+
+        targets_ = (targets_ - targets_mean) / jnp.sqrt(targets_var + 1.0e-6)
+
+        return targets_
 
 
 class SwinTransformerV2ForSimMIM(SwinTransformerV2):
@@ -87,22 +116,16 @@ class SimMIM(linen.Module):
     norm_targets_enabled: bool = True
     norm_patch_size: int = 47
 
-    def setup(self):
-        self.decoder = linen.Sequential(
-            [
-                linen.Conv(features=self.encoder_stride**2 * 3, kernel_size=(1, 1)),
-                partial(
-                    einops.rearrange,
-                    pattern="... h w (c b1 b2) -> ... (h b1) (w b2) c",
-                    b1=self.encoder_stride,
-                    b2=self.encoder_stride,
-                ),
-            ]
-        )
-
+    @linen.compact
     def __call__(self, x, mask, train: bool = False):
         z = self.encoder(x, mask, train)
-        x_rec = self.decoder(z)
+        x_rec = linen.Conv(features=self.encoder_stride**2 * 3, kernel_size=(1, 1))(z)
+        x_rec = einops.rearrange(
+            x_rec,
+            pattern="... h w (c b1 b2) -> ... (h b1) (w b2) c",
+            b1=self.encoder_stride,
+            b2=self.encoder_stride,
+        )
 
         mask = jnp.expand_dims(
             jnp.repeat(
@@ -113,8 +136,9 @@ class SimMIM(linen.Module):
             axis=-1,
         )
 
+        B, H, W, C = x.shape
         if self.norm_targets_enabled:
-            x = norm_targets(x, self.norm_patch_size)
+            x = WindowedNorm(target_size=(H, W), window_size=self.norm_patch_size)(x)
 
         loss_recon = jnp.abs(x - x_rec)
         loss = jnp.sum(loss_recon * mask) / (jnp.sum(mask) + 1e-5) / self.in_chans

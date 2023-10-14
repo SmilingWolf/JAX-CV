@@ -25,6 +25,7 @@ class Metrics(metrics.Collection):
 class TrainState(train_state.TrainState):
     metrics: Metrics
     constants: Any
+    pt_constants: Any
 
 
 def create_train_state(
@@ -46,6 +47,7 @@ def create_train_state(
     )
     params = variables["params"]
     constants = variables["swinv2_constants"]
+    pt_constants = variables["simmim_constants"]
 
     loss = metrics.Average.from_output("loss")
     collection = Metrics.create(loss=loss)
@@ -63,6 +65,7 @@ def create_train_state(
         tx=tx,
         metrics=collection.empty(),
         constants=constants,
+        pt_constants=pt_constants,
     )
 
 
@@ -70,9 +73,13 @@ def train_step(state, batch, dropout_key):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
-    def loss_fn(params, constants):
+    def loss_fn(params, constants, pt_constants):
         loss, _ = state.apply_fn(
-            {"params": params, "swinv2_constants": constants},
+            {
+                "params": params,
+                "swinv2_constants": constants,
+                "simmim_constants": pt_constants,
+            },
             batch["images"],
             mask=batch["masks"],
             train=True,
@@ -81,7 +88,7 @@ def train_step(state, batch, dropout_key):
         return loss
 
     grad_fn = jax.value_and_grad(loss_fn)
-    loss, grads = grad_fn(state.params, state.constants)
+    loss, grads = grad_fn(state.params, state.constants, state.pt_constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
@@ -93,7 +100,11 @@ def train_step(state, batch, dropout_key):
 
 def eval_step(*, state, batch):
     loss, _ = state.apply_fn(
-        {"params": state.params, "swinv2_constants": state.constants},
+        {
+            "params": state.params,
+            "swinv2_constants": state.constants,
+            "simmim_constants": state.pt_constants,
+        },
         batch["images"],
         mask=batch["masks"],
         train=False,
@@ -233,7 +244,7 @@ global_batch_size = batch_size * compute_units
 
 # Dataset params
 image_size = args.image_size
-num_classes = 0 #dataset_specs["num_classes"]
+num_classes = 0
 train_samples = dataset_specs["train_samples"]
 val_samples = dataset_specs["val_samples"]
 
