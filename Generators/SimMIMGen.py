@@ -354,7 +354,6 @@ class DataGenerator:
                 {
                     "images": tf.cast(images, tf.float32) * (1.0 / 127.5) - 1,
                     "masks": masks,
-                    "labels": labels,
                 }
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
