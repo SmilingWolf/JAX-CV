@@ -40,7 +40,6 @@ class WindowedNorm(linen.Module):
         ).value
 
     def __call__(self, targets):
-        B, H, W, C = targets.shape
         window_size = self.window_size
 
         window_shape = (window_size, window_size)
