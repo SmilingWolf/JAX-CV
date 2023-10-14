@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Tuple
+from typing import Any, Tuple
 
 import einops
 import jax.numpy as jnp
@@ -115,10 +115,16 @@ class SimMIM(linen.Module):
     norm_targets_enabled: bool = True
     norm_patch_size: int = 47
 
+    dtype: Any = jnp.float32
+
     @linen.compact
     def __call__(self, x, mask, train: bool = False):
         z = self.encoder(x, mask, train)
-        x_rec = linen.Conv(features=self.encoder_stride**2 * 3, kernel_size=(1, 1))(z)
+        x_rec = linen.Conv(
+            features=self.encoder_stride**2 * 3,
+            kernel_size=(1, 1),
+            dtype=self.dtype,
+        )(z)
         x_rec = einops.rearrange(
             x_rec,
             pattern="... h w (c b1 b2) -> ... (h b1) (w b2) c",
@@ -139,6 +145,7 @@ class SimMIM(linen.Module):
         if self.norm_targets_enabled:
             x = WindowedNorm(target_size=(H, W), window_size=self.norm_patch_size)(x)
 
+        x_rec = linen.dtypes.promote_dtype(x_rec, dtype=x.dtype)[0]
         loss_recon = jnp.abs(x - x_rec)
         loss = jnp.sum(loss_recon * mask) / (jnp.sum(mask) + 1e-5) / self.in_chans
 
@@ -154,7 +161,7 @@ def simmim_swinv2_tiny_window8_256(**kwargs):
         num_heads=(3, 6, 12, 24),
     )
     encoder = encoder(**kwargs)
-    model = SimMIM(encoder, 32, encoder.patch_size)
+    model = SimMIM(encoder, 32, encoder.patch_size, dtype=encoder.dtype)
     return model
 
 
@@ -167,5 +174,5 @@ def simmim_swinv2_base_window8_256(**kwargs):
         num_heads=(4, 8, 16, 32),
     )
     encoder = encoder(**kwargs)
-    model = SimMIM(encoder, 32, encoder.patch_size)
+    model = SimMIM(encoder, 32, encoder.patch_size, dtype=encoder.dtype)
     return model
