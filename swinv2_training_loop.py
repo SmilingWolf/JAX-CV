@@ -9,13 +9,13 @@ import jax.numpy as jnp
 import optax
 import orbax.checkpoint
 import tensorflow as tf
-import wandb
 from clu import metrics
 from flax import jax_utils
 from flax.training import orbax_utils, train_state
 from tqdm import tqdm
 
 import Models
+import wandb
 from Generators.WDTaggerGen import DataGenerator
 from Metrics.ConfusionMatrix import f1score, mcc
 
@@ -32,6 +32,30 @@ class TrainState(train_state.TrainState):
     constants: Any
 
 
+def create_optimizer_tx(
+    params,
+    learning_rate: Union[float, Callable],
+    weight_decay: float,
+    freeze_model_body: bool,
+):
+    def should_decay(path, _):
+        is_kernel = path[-1].key == "kernel"
+        is_cpb = "attention_bias" in [x.key for x in path]
+        return is_kernel and not is_cpb
+
+    def should_freeze(path, _):
+        return "trainable" if "head" in path else "frozen"
+
+    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
+    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
+
+    if freeze_model_body:
+        partition_optimizers = {"trainable": tx, "frozen": optax.set_to_zero()}
+        param_partitions = flax.traverse_util.path_aware_map(should_freeze, params)
+        tx = optax.multi_transform(partition_optimizers, param_partitions)
+    return tx
+
+
 def create_train_state(
     module,
     params_key,
@@ -39,6 +63,7 @@ def create_train_state(
     num_classes: int,
     learning_rate: Union[float, Callable],
     weight_decay: float,
+    freeze_model_body: bool = False,
 ):
     """Creates an initial 'TrainState'."""
     # initialize parameters by passing a template image
@@ -65,13 +90,8 @@ def create_train_state(
     )
     collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
 
-    def should_decay(path, _):
-        is_kernel = path[-1].key == "kernel"
-        is_cpb = "attention_bias" in [x.key for x in path]
-        return is_kernel and not is_cpb
+    tx = create_optimizer_tx(params, learning_rate, weight_decay, freeze_model_body)
 
-    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
-    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
     return TrainState.create(
         apply_fn=module.apply,
         params=params,
@@ -153,6 +173,17 @@ parser.add_argument(
     default=None,
     help="Restore the parameters from the last step of the given orbax checkpoint. Must be an absolute path. WARNING: restores params only!",
     type=str,
+)
+parser.add_argument(
+    "--restore-simmim-ckpt",
+    default=None,
+    help="Restore the parameters from the last step of the given SimMIM-pretrained orbax checkpoint. Must be an absolute path",
+    type=str,
+)
+parser.add_argument(
+    "--freeze-model-body",
+    action="store_true",
+    help="Freeze the feature extraction layers, train classifier head only",
 )
 parser.add_argument(
     "--dataset-file",
@@ -309,6 +340,8 @@ train_config["cutout_max_pct"] = cutout_max_pct
 train_config["cutout_patches"] = cutout_patches
 train_config["random_resize_method"] = random_resize_method
 train_config["restore_params_ckpt"] = args.restore_params_ckpt or ""
+train_config["restore_simmim_ckpt"] = args.restore_simmim_ckpt or ""
+train_config["freeze_model_body"] = args.freeze_model_body
 
 # WandB tracking
 wandb.init(
@@ -385,6 +418,7 @@ state = create_train_state(
     num_classes,
     learning_rate,
     weight_decay,
+    args.freeze_model_body,
 )
 del params_key
 
@@ -411,13 +445,25 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
-if args.restore_params_ckpt is not None:
+if args.restore_params_ckpt or args.restore_simmim_ckpt:
+    ckpt_path = args.restore_params_ckpt or args.restore_simmim_ckpt
     throwaway_manager = orbax.checkpoint.CheckpointManager(
-        args.restore_params_ckpt,
+        ckpt_path,
         orbax_checkpointer,
     )
     latest_epoch = throwaway_manager.latest_step()
-    restored = throwaway_manager.restore(latest_epoch, items=ckpt)
+    restored = throwaway_manager.restore(latest_epoch)
+
+    transforms = {}
+    if args.restore_simmim_ckpt:
+        # SimMIM checkpoint have no head params - don't try to restore them.
+        # All the other params we care about are under the "encoder" subsection
+        tx_regex = r"(?!model/params/head)model/(params|constants)/(.*)"
+        tx_action = orbax.checkpoint.Transform(original_key=r"model/\1/encoder/\2")
+        transforms[tx_regex] = tx_action
+
+    restored = orbax.checkpoint.apply_transformations(restored, transforms, ckpt)
+
     state = state.replace(params=restored["model"].params)
     del throwaway_manager
 
