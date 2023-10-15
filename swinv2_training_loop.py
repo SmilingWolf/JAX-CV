@@ -9,13 +9,13 @@ import jax.numpy as jnp
 import optax
 import orbax.checkpoint
 import tensorflow as tf
+import wandb
 from clu import metrics
 from flax import jax_utils
 from flax.training import orbax_utils, train_state
 from tqdm import tqdm
 
 import Models
-import wandb
 from Generators.WDTaggerGen import DataGenerator
 from Metrics.ConfusionMatrix import f1score, mcc
 
