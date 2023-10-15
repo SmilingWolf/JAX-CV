@@ -3,13 +3,15 @@ import json
 from datetime import datetime
 from typing import Any, Callable, Union
 
+import flax
 import jax
 import jax.numpy as jnp
 import optax
 import orbax.checkpoint
 import tensorflow as tf
+import wandb
 from clu import metrics
-from flax import jax_utils, struct
+from flax import jax_utils
 from flax.training import orbax_utils, train_state
 from tqdm import tqdm
 
@@ -18,7 +20,7 @@ from Generators.WDTaggerGen import DataGenerator
 from Metrics.ConfusionMatrix import f1score, mcc
 
 
-@struct.dataclass
+@flax.struct.dataclass
 class Metrics(metrics.Collection):
     loss: metrics.Metric
     f1score: metrics.Metric
@@ -142,6 +144,11 @@ parser.add_argument(
     type=str,
 )
 parser.add_argument(
+    "--wandb-tags",
+    nargs="*",
+    help="Space separated list of tags for WandB",
+)
+parser.add_argument(
     "--restore-params-ckpt",
     default=None,
     help="Restore the parameters from the last step of the given orbax checkpoint. Must be an absolute path. WARNING: restores params only!",
@@ -161,7 +168,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--checkpoints-root",
-    default="/tmp/checkpoints",
+    default="/mnt/c/Users/SmilingWolf/Desktop/TFKeras/JAX/checkpoints",
     help="Checkpoints root, where the checkpoints will be stored following a <ckpt_root>/<run_name>/<epoch> structure",
     type=str,
 )
@@ -274,6 +281,43 @@ rotation_ratio = args.rotation_ratio
 cutout_max_pct = args.cutout_max_pct
 cutout_patches = args.cutout_patches
 random_resize_method = True
+
+# WandB tracking
+train_config = {}
+train_config["model_name"] = model_name
+train_config["checkpoints_root"] = checkpoints_root
+train_config["dataset_root"] = dataset_root
+train_config["dataset_file"] = args.dataset_file
+train_config["num_epochs"] = num_epochs
+train_config["warmup_epochs"] = warmup_epochs
+train_config["batch_size"] = batch_size
+train_config["compute_units"] = compute_units
+train_config["global_batch_size"] = global_batch_size
+train_config["image_size"] = image_size
+train_config["num_classes"] = num_classes
+train_config["train_samples"] = train_samples
+train_config["val_samples"] = val_samples
+train_config["window_ratio"] = window_ratio
+train_config["window_size"] = window_size
+train_config["learning_rate"] = learning_rate
+train_config["weight_decay"] = weight_decay
+train_config["dropout_rate"] = dropout_rate
+train_config["noise_level"] = noise_level
+train_config["mixup_alpha"] = mixup_alpha
+train_config["rotation_ratio"] = rotation_ratio
+train_config["cutout_max_pct"] = cutout_max_pct
+train_config["cutout_patches"] = cutout_patches
+train_config["random_resize_method"] = random_resize_method
+train_config["restore_params_ckpt"] = args.restore_params_ckpt or ""
+
+# WandB tracking
+wandb.init(
+    project="tpu-tracking",
+    entity="smilingwolf",
+    config=train_config,
+    name=run_name,
+    tags=args.wandb_tags,
+)
 
 tf.random.set_seed(0)
 root_key = jax.random.key(0)
@@ -437,6 +481,19 @@ for step, batch in enumerate(train_ds):
             f"loss: {metrics_history['val_loss'][-1]:.04f}, "
             f"f1score: {metrics_history['val_f1score'][-1]*100:.02f}, "
             f"mcc: {metrics_history['val_mcc'][-1]*100:.02f}"
+        )
+
+        # Log Metrics to Weights & Biases
+        wandb.log(
+            {
+                "train_loss": metrics_history["train_loss"][-1],
+                "train_f1score": metrics_history["train_f1score"][-1] * 100,
+                "train_mcc": metrics_history["train_mcc"][-1] * 100,
+                "val_loss": metrics_history["val_loss"][-1],
+                "val_f1score": metrics_history["val_f1score"][-1] * 100,
+                "val_mcc": metrics_history["val_mcc"][-1] * 100,
+            },
+            step=(step + 1) // num_steps_per_epoch,
         )
 
         ckpt["model"] = val_state
