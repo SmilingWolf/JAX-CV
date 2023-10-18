@@ -203,6 +203,11 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
+    "--windowed-norm",
+    action="store_true",
+    help="Use windowed norm of input images as reconstruction target in SimMIM",
+)
+parser.add_argument(
     "--mixup-alpha",
     default=0.8,
     help="MixUp alpha",
@@ -261,6 +266,7 @@ window_size = image_size // window_ratio
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
 dropout_rate = args.dropout_rate
+windowed_norm_enabled = args.windowed_norm
 
 # Augmentations hyperparams
 noise_level = 2
@@ -276,7 +282,6 @@ mask_input_size = image_size // model_patch_size
 # WandB tracking
 train_config = {}
 train_config["model_name"] = model_name
-train_config["run_name"] = run_name
 train_config["checkpoints_root"] = checkpoints_root
 train_config["dataset_root"] = dataset_root
 train_config["dataset_file"] = args.dataset_file
@@ -294,6 +299,7 @@ train_config["window_size"] = window_size
 train_config["learning_rate"] = learning_rate
 train_config["weight_decay"] = weight_decay
 train_config["dropout_rate"] = dropout_rate
+train_config["windowed_norm_enabled"] = windowed_norm_enabled
 train_config["noise_level"] = noise_level
 train_config["mixup_alpha"] = mixup_alpha
 train_config["rotation_ratio"] = rotation_ratio
@@ -362,6 +368,7 @@ model = model_builder(
     num_classes=num_classes,
     window_size=window_size,
     drop_path_rate=dropout_rate,
+    windowed_norm_enabled=windowed_norm_enabled,
     dtype=jnp.bfloat16,
 )
 # tab_img = jnp.ones([1, image_size, image_size, 3])

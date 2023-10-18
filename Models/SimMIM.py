@@ -9,6 +9,7 @@ from .SwinV2 import SwinTransformerV2
 
 
 class WindowedNorm(linen.Module):
+    enabled: bool
     target_size: Tuple[int]
     window_size: int = 47
 
@@ -40,6 +41,9 @@ class WindowedNorm(linen.Module):
         ).value
 
     def __call__(self, targets):
+        if not self.enabled:
+            return targets
+
         window_size = self.window_size
 
         window_shape = (window_size, window_size)
@@ -112,7 +116,7 @@ class SimMIM(linen.Module):
     patch_size: int
     in_chans: int = 3
 
-    norm_targets_enabled: bool = True
+    norm_targets_enabled: bool = False
     norm_patch_size: int = 47
 
     dtype: Any = jnp.float32
@@ -142,8 +146,12 @@ class SimMIM(linen.Module):
         )
 
         B, H, W, C = x.shape
-        if self.norm_targets_enabled:
-            x = WindowedNorm(target_size=(H, W), window_size=self.norm_patch_size)(x)
+        wn = WindowedNorm(
+            target_size=(H, W),
+            window_size=self.norm_patch_size,
+            enabled=self.norm_targets_enabled,
+        )
+        x = wn(x)
 
         x_rec = linen.dtypes.promote_dtype(x_rec, dtype=x.dtype)[0]
         loss_recon = jnp.abs(x - x_rec)
@@ -153,6 +161,8 @@ class SimMIM(linen.Module):
 
 
 def simmim_swinv2_tiny_window8_256(**kwargs):
+    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+
     encoder = partial(
         SwinTransformerV2ForSimMIM,
         embed_dim=96,
@@ -161,11 +171,19 @@ def simmim_swinv2_tiny_window8_256(**kwargs):
         num_heads=(3, 6, 12, 24),
     )
     encoder = encoder(**kwargs)
-    model = SimMIM(encoder, 32, encoder.patch_size, dtype=encoder.dtype)
+    model = SimMIM(
+        encoder,
+        32,
+        encoder.patch_size,
+        norm_targets_enabled=norm_targets_enabled,
+        dtype=encoder.dtype,
+    )
     return model
 
 
 def simmim_swinv2_base_window8_256(**kwargs):
+    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+
     encoder = partial(
         SwinTransformerV2ForSimMIM,
         embed_dim=128,
@@ -174,5 +192,11 @@ def simmim_swinv2_base_window8_256(**kwargs):
         num_heads=(4, 8, 16, 32),
     )
     encoder = encoder(**kwargs)
-    model = SimMIM(encoder, 32, encoder.patch_size, dtype=encoder.dtype)
+    model = SimMIM(
+        encoder,
+        32,
+        encoder.patch_size,
+        norm_targets_enabled=norm_targets_enabled,
+        dtype=encoder.dtype,
+    )
     return model
