@@ -105,8 +105,8 @@ def mcc(threshold, num_classes, from_logits, averaging):
             numerator = (self.true_positives / N) - (S * P)
             denominator = S * P * (1 - S) * (1 - P)
             denominator = jnp.maximum(denominator, 1e-12)
-            denominator = jnp.power(denominator, -0.5)
-            return jnp.mean(numerator * denominator)
+            denominator = jnp.sqrt(denominator)
+            return jnp.mean(numerator / denominator)
 
     return MCC
 
