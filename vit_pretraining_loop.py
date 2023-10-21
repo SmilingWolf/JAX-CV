@@ -26,7 +26,6 @@ class Metrics(metrics.Collection):
 
 class TrainState(train_state.TrainState):
     metrics: Metrics
-    constants: Any
     pt_constants: Any
 
 
@@ -48,7 +47,6 @@ def create_train_state(
         train=False,
     )
     params = variables["params"]
-    constants = variables["swinv2_constants"]
     pt_constants = variables["simmim_constants"]
 
     loss = metrics.Average.from_output("loss")
@@ -66,7 +64,6 @@ def create_train_state(
         params=params,
         tx=tx,
         metrics=collection.empty(),
-        constants=constants,
         pt_constants=pt_constants,
     )
 
@@ -75,11 +72,10 @@ def train_step(state, batch, dropout_key):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
-    def loss_fn(params, constants, pt_constants):
+    def loss_fn(params, pt_constants):
         loss, _ = state.apply_fn(
             {
                 "params": params,
-                "swinv2_constants": constants,
                 "simmim_constants": pt_constants,
             },
             batch["images"],
@@ -90,7 +86,7 @@ def train_step(state, batch, dropout_key):
         return loss
 
     grad_fn = jax.value_and_grad(loss_fn)
-    loss, grads = grad_fn(state.params, state.constants, state.pt_constants)
+    loss, grads = grad_fn(state.params, state.pt_constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
@@ -104,7 +100,6 @@ def eval_step(*, state, batch):
     loss, _ = state.apply_fn(
         {
             "params": state.params,
-            "swinv2_constants": state.constants,
             "simmim_constants": state.pt_constants,
         },
         batch["images"],
@@ -121,7 +116,7 @@ def eval_step(*, state, batch):
 parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
     "--model-name",
-    default="simmim_swinv2_tiny",
+    default="simmim_vit_small",
     help="Model variant to train",
     type=str,
 )
@@ -182,6 +177,12 @@ parser.add_argument(
     "--image-size",
     default=256,
     help="Image resolution in input to the network",
+    type=int,
+)
+parser.add_argument(
+    "--patch-size",
+    default=16,
+    help="Size of the image patches",
     type=int,
 )
 parser.add_argument(
@@ -261,8 +262,7 @@ train_samples = dataset_specs["train_samples"]
 val_samples = dataset_specs["val_samples"]
 
 # Model hyperparams
-window_ratio = 32
-window_size = image_size // window_ratio
+patch_size = args.patch_size
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
 dropout_rate = args.dropout_rate
@@ -276,7 +276,7 @@ cutout_max_pct = args.cutout_max_pct
 cutout_patches = args.cutout_patches
 random_resize_method = True
 mask_patch_size = 32
-model_patch_size = 4
+model_patch_size = patch_size
 mask_input_size = image_size // model_patch_size
 
 # WandB tracking
@@ -294,8 +294,7 @@ train_config["image_size"] = image_size
 train_config["num_classes"] = num_classes
 train_config["train_samples"] = train_samples
 train_config["val_samples"] = val_samples
-train_config["window_ratio"] = window_ratio
-train_config["window_size"] = window_size
+train_config["patch_size"] = patch_size
 train_config["learning_rate"] = learning_rate
 train_config["weight_decay"] = weight_decay
 train_config["dropout_rate"] = dropout_rate
@@ -364,9 +363,8 @@ val_ds = validation_generator.genDS()
 val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
 
 model = model_builder(
-    img_size=image_size,
+    patch_size=patch_size,
     num_classes=num_classes,
-    window_size=window_size,
     drop_path_rate=dropout_rate,
     windowed_norm_enabled=windowed_norm_enabled,
     dtype=jnp.bfloat16,

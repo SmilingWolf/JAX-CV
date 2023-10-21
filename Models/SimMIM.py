@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from flax import linen
 
 from .SwinV2 import SwinTransformerV2
+from .ViT import VisionTransformer
 
 
 class WindowedNorm(linen.Module):
@@ -109,6 +110,34 @@ class SwinTransformerV2ForSimMIM(SwinTransformerV2):
         return x
 
 
+class VisionTransformerForSimMIM(VisionTransformer):
+    def setup(self):
+        super().setup()
+
+        token_init = linen.initializers.normal(0.02)
+        self.mask_token = self.param("mask_token", token_init, (1, 1, self.embed_dim))
+
+    def __call__(self, x, mask, train: bool = False):
+        x = self.patch_embed(x)
+
+        B, L, _ = x.shape
+        mask_tokens = jnp.broadcast_to(self.mask_token, (B, L, self.embed_dim))
+        mask = jnp.reshape(mask, (B, L, 1)).astype(mask_tokens.dtype)
+        x = x * (1.0 - mask) + mask_tokens * mask
+
+        x = self.pos_emb(x)
+
+        for layer in self.vit_body:
+            x = layer(x, train=train)
+
+        x = self.norm(x)
+
+        B, L, C = x.shape
+        H = W = int(L**0.5)
+        x = jnp.reshape(x, (B, H, W, C))
+        return x
+
+
 class SimMIM(linen.Module):
     encoder: linen.Module
     encoder_stride: int
@@ -195,6 +224,48 @@ def simmim_swinv2_base_window8_256(**kwargs):
     model = SimMIM(
         encoder,
         32,
+        encoder.patch_size,
+        norm_targets_enabled=norm_targets_enabled,
+        dtype=encoder.dtype,
+    )
+    return model
+
+
+def simmim_vit_small(**kwargs):
+    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+
+    encoder = partial(
+        VisionTransformerForSimMIM,
+        num_layers=12,
+        embed_dim=384,
+        mlp_dim=1536,
+        num_heads=6,
+    )
+    encoder = encoder(**kwargs)
+    model = SimMIM(
+        encoder,
+        encoder.patch_size,
+        encoder.patch_size,
+        norm_targets_enabled=norm_targets_enabled,
+        dtype=encoder.dtype,
+    )
+    return model
+
+
+def simmim_vit_base(**kwargs):
+    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+
+    encoder = partial(
+        VisionTransformerForSimMIM,
+        num_layers=12,
+        embed_dim=768,
+        mlp_dim=3072,
+        num_heads=12,
+    )
+    encoder = encoder(**kwargs)
+    model = SimMIM(
+        encoder,
+        encoder.patch_size,
         encoder.patch_size,
         norm_targets_enabled=norm_targets_enabled,
         dtype=encoder.dtype,
