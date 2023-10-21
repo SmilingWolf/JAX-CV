@@ -16,88 +16,58 @@ from flax.training import orbax_utils, train_state
 from tqdm import tqdm
 
 import Models
-from Generators.WDTaggerGen import DataGenerator
-from Metrics.ConfusionMatrix import f1score, mcc
+from Generators.SimMIMGen import DataGenerator
 
 
 @flax.struct.dataclass
 class Metrics(metrics.Collection):
     loss: metrics.Metric
-    f1score: metrics.Metric
-    mcc: metrics.Metric
 
 
 class TrainState(train_state.TrainState):
     metrics: Metrics
     constants: Any
-
-
-def create_optimizer_tx(
-    params,
-    learning_rate: Union[float, Callable],
-    weight_decay: float,
-    freeze_model_body: bool,
-):
-    def should_decay(path, _):
-        is_kernel = path[-1].key == "kernel"
-        is_cpb = "attention_bias" in [x.key for x in path]
-        return is_kernel and not is_cpb
-
-    def should_freeze(path, _):
-        return "trainable" if "head" in path else "frozen"
-
-    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
-    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
-
-    if freeze_model_body:
-        partition_optimizers = {"trainable": tx, "frozen": optax.set_to_zero()}
-        param_partitions = flax.traverse_util.path_aware_map(should_freeze, params)
-        tx = optax.multi_transform(partition_optimizers, param_partitions)
-    return tx
+    pt_constants: Any
 
 
 def create_train_state(
     module,
     params_key,
     target_size: int,
+    mask_input_size: int,
     num_classes: int,
     learning_rate: Union[float, Callable],
     weight_decay: float,
-    freeze_model_body: bool = False,
 ):
     """Creates an initial 'TrainState'."""
     # initialize parameters by passing a template image
     variables = module.init(
         params_key,
         jnp.ones([1, target_size, target_size, 3]),
+        mask=jnp.ones([1, mask_input_size, mask_input_size]),
         train=False,
     )
     params = variables["params"]
     constants = variables["swinv2_constants"]
+    pt_constants = variables["simmim_constants"]
 
     loss = metrics.Average.from_output("loss")
-    f1score_metric = f1score(
-        threshold=0.4,
-        averaging="macro",
-        num_classes=num_classes,
-        from_logits=True,
-    )
-    mcc_metric = mcc(
-        threshold=0.4,
-        averaging="macro",
-        num_classes=num_classes,
-        from_logits=True,
-    )
-    collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
+    collection = Metrics.create(loss=loss)
 
-    tx = create_optimizer_tx(params, learning_rate, weight_decay, freeze_model_body)
+    def should_decay(path, _):
+        is_kernel = path[-1].key == "kernel"
+        is_cpb = "attention_bias" in [x.key for x in path]
+        return is_kernel and not is_cpb
 
+    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
+    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
     return TrainState.create(
         apply_fn=module.apply,
         params=params,
         tx=tx,
         metrics=collection.empty(),
         constants=constants,
+        pt_constants=pt_constants,
     )
 
 
@@ -105,46 +75,44 @@ def train_step(state, batch, dropout_key):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
-    def loss_fn(params, constants):
-        logits = state.apply_fn(
-            {"params": params, "swinv2_constants": constants},
+    def loss_fn(params, constants, pt_constants):
+        loss, _ = state.apply_fn(
+            {
+                "params": params,
+                "swinv2_constants": constants,
+                "simmim_constants": pt_constants,
+            },
             batch["images"],
+            mask=batch["masks"],
             train=True,
             rngs={"dropout": dropout_train_key},
         )
-        loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
-        loss = loss.sum() / batch["labels"].shape[0]
-        return loss, logits
+        return loss
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, logits), grads = grad_fn(state.params, state.constants)
+    grad_fn = jax.value_and_grad(loss_fn)
+    loss, grads = grad_fn(state.params, state.constants, state.pt_constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
-    metric_updates = state.metrics.gather_from_model_output(
-        logits=logits,
-        labels=batch["labels"],
-        loss=loss,
-    )
+    metric_updates = state.metrics.gather_from_model_output(loss=loss)
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
     return state
 
 
 def eval_step(*, state, batch):
-    logits = state.apply_fn(
-        {"params": state.params, "swinv2_constants": state.constants},
+    loss, _ = state.apply_fn(
+        {
+            "params": state.params,
+            "swinv2_constants": state.constants,
+            "simmim_constants": state.pt_constants,
+        },
         batch["images"],
+        mask=batch["masks"],
         train=False,
     )
 
-    loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
-    loss = loss.sum() / batch["labels"].shape[0]
-    metric_updates = state.metrics.gather_from_model_output(
-        logits=logits,
-        labels=batch["labels"],
-        loss=loss,
-    )
+    metric_updates = state.metrics.gather_from_model_output(loss=loss)
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
     return state
@@ -153,7 +121,7 @@ def eval_step(*, state, batch):
 parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
     "--model-name",
-    default="swinv2_tiny",
+    default="simmim_swinv2_tiny",
     help="Model variant to train",
     type=str,
 )
@@ -173,17 +141,6 @@ parser.add_argument(
     default=None,
     help="Restore the parameters from the last step of the given orbax checkpoint. Must be an absolute path. WARNING: restores params only!",
     type=str,
-)
-parser.add_argument(
-    "--restore-simmim-ckpt",
-    default=None,
-    help="Restore the parameters from the last step of the given SimMIM-pretrained orbax checkpoint. Must be an absolute path",
-    type=str,
-)
-parser.add_argument(
-    "--freeze-model-body",
-    action="store_true",
-    help="Freeze the feature extraction layers, train classifier head only",
 )
 parser.add_argument(
     "--dataset-file",
@@ -246,6 +203,11 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
+    "--windowed-norm",
+    action="store_true",
+    help="Use windowed norm of input images as reconstruction target in SimMIM",
+)
+parser.add_argument(
     "--mixup-alpha",
     default=0.8,
     help="MixUp alpha",
@@ -294,7 +256,7 @@ global_batch_size = batch_size * compute_units
 
 # Dataset params
 image_size = args.image_size
-num_classes = dataset_specs["num_classes"]
+num_classes = 0
 train_samples = dataset_specs["train_samples"]
 val_samples = dataset_specs["val_samples"]
 
@@ -304,6 +266,7 @@ window_size = image_size // window_ratio
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
 dropout_rate = args.dropout_rate
+windowed_norm_enabled = args.windowed_norm
 
 # Augmentations hyperparams
 noise_level = 2
@@ -312,6 +275,9 @@ rotation_ratio = args.rotation_ratio
 cutout_max_pct = args.cutout_max_pct
 cutout_patches = args.cutout_patches
 random_resize_method = True
+mask_patch_size = 32
+model_patch_size = 4
+mask_input_size = image_size // model_patch_size
 
 # WandB tracking
 train_config = {}
@@ -333,15 +299,17 @@ train_config["window_size"] = window_size
 train_config["learning_rate"] = learning_rate
 train_config["weight_decay"] = weight_decay
 train_config["dropout_rate"] = dropout_rate
+train_config["windowed_norm_enabled"] = windowed_norm_enabled
 train_config["noise_level"] = noise_level
 train_config["mixup_alpha"] = mixup_alpha
 train_config["rotation_ratio"] = rotation_ratio
 train_config["cutout_max_pct"] = cutout_max_pct
 train_config["cutout_patches"] = cutout_patches
 train_config["random_resize_method"] = random_resize_method
+train_config["mask_patch_size"] = mask_patch_size
+train_config["model_patch_size"] = model_patch_size
+train_config["mask_input_size"] = mask_input_size
 train_config["restore_params_ckpt"] = args.restore_params_ckpt or ""
-train_config["restore_simmim_ckpt"] = args.restore_simmim_ckpt or ""
-train_config["freeze_model_body"] = args.freeze_model_body
 
 # WandB tracking
 wandb.init(
@@ -370,6 +338,9 @@ training_generator = DataGenerator(
     cutout_max_pct=cutout_max_pct,
     cutout_patches=cutout_patches,
     random_resize_method=random_resize_method,
+    mask_patch_size=mask_patch_size,
+    model_patch_size=model_patch_size,
+    mask_ratio=0.6,
 )
 train_ds = training_generator.genDS()
 train_ds = jax_utils.prefetch_to_device(train_ds.as_numpy_iterator(), size=2)
@@ -385,6 +356,9 @@ validation_generator = DataGenerator(
     rotation_ratio=0.0,
     cutout_max_pct=0.0,
     random_resize_method=False,
+    mask_patch_size=32,
+    model_patch_size=4,
+    mask_ratio=0.6,
 )
 val_ds = validation_generator.genDS()
 val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
@@ -394,13 +368,12 @@ model = model_builder(
     num_classes=num_classes,
     window_size=window_size,
     drop_path_rate=dropout_rate,
+    windowed_norm_enabled=windowed_norm_enabled,
     dtype=jnp.bfloat16,
 )
-# print(
-#     model.tabulate(
-#         jax.random.key(0), jnp.ones([1, image_size, image_size, 3]), train=False
-#     )
-# )
+# tab_img = jnp.ones([1, image_size, image_size, 3])
+# tab_mask = jnp.ones([1, mask_input_size, mask_input_size])
+# print(model.tabulate(jax.random.key(0), tab_img, tab_mask, train=False))
 
 num_steps_per_epoch = train_samples // global_batch_size
 learning_rate = optax.warmup_cosine_decay_schedule(
@@ -415,10 +388,10 @@ state = create_train_state(
     model,
     params_key,
     image_size,
-    num_classes,
+    mask_input_size,
+    0,
     learning_rate,
     weight_decay,
-    args.freeze_model_body,
 )
 del params_key
 
@@ -445,25 +418,13 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
-if args.restore_params_ckpt or args.restore_simmim_ckpt:
-    ckpt_path = args.restore_params_ckpt or args.restore_simmim_ckpt
+if args.restore_params_ckpt is not None:
     throwaway_manager = orbax.checkpoint.CheckpointManager(
-        ckpt_path,
+        args.restore_params_ckpt,
         orbax_checkpointer,
     )
     latest_epoch = throwaway_manager.latest_step()
-    restored = throwaway_manager.restore(latest_epoch)
-
-    transforms = {}
-    if args.restore_simmim_ckpt:
-        # SimMIM checkpoint have no head params - don't try to restore them.
-        # All the other params we care about are under the "encoder" subsection
-        tx_regex = r"(?!model/params/head)model/(params|constants)/(.*)"
-        tx_action = orbax.checkpoint.Transform(original_key=r"model/\1/encoder/\2")
-        transforms[tx_regex] = tx_action
-
-    restored = orbax.checkpoint.apply_transformations(restored, transforms, ckpt)
-
+    restored = throwaway_manager.restore(latest_epoch, items=ckpt)
     state = state.replace(params=restored["model"].params)
     del throwaway_manager
 
@@ -486,7 +447,7 @@ for step, batch in enumerate(train_ds):
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
 
-    if step % 192 == 0:
+    if step % 256 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
         pbar.set_postfix(loss=f"{merged_metrics.loss.compute():.04f}")
 
@@ -518,26 +479,18 @@ for step, batch in enumerate(train_ds):
 
         print(
             f"train epoch: {(step+1) // num_steps_per_epoch}, "
-            f"loss: {metrics_history['train_loss'][-1]:.04f}, "
-            f"f1score: {metrics_history['train_f1score'][-1]*100:.02f}, "
-            f"mcc: {metrics_history['train_mcc'][-1]*100:.02f}"
+            f"loss: {metrics_history['train_loss'][-1]:.04f}"
         )
         print(
             f"val epoch: {(step+1) // num_steps_per_epoch}, "
-            f"loss: {metrics_history['val_loss'][-1]:.04f}, "
-            f"f1score: {metrics_history['val_f1score'][-1]*100:.02f}, "
-            f"mcc: {metrics_history['val_mcc'][-1]*100:.02f}"
+            f"loss: {metrics_history['val_loss'][-1]:.04f}"
         )
 
         # Log Metrics to Weights & Biases
         wandb.log(
             {
                 "train_loss": metrics_history["train_loss"][-1],
-                "train_f1score": metrics_history["train_f1score"][-1] * 100,
-                "train_mcc": metrics_history["train_mcc"][-1] * 100,
                 "val_loss": metrics_history["val_loss"][-1],
-                "val_f1score": metrics_history["val_f1score"][-1] * 100,
-                "val_mcc": metrics_history["val_mcc"][-1] * 100,
             },
             step=(step + 1) // num_steps_per_epoch,
         )
