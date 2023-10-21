@@ -19,9 +19,9 @@ class MLP(linen.Module):
 
         x = linen.Dense(self.hidden_features, dtype=self.dtype)(x)
         x = self.act_layer(x)
-        x = linen.Dropout(self.drop_ratio, deterministic=not train)(x)
+        x = linen.Dropout(self.drop_ratio)(x, deterministic=not train)
         x = linen.Dense(out_dim, dtype=self.dtype)(x)
-        x = linen.Dropout(self.drop_ratio, deterministic=not train)(x)
+        x = linen.Dropout(self.drop_ratio)(x, deterministic=not train)
         return x
 
 
