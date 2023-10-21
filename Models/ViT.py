@@ -24,6 +24,19 @@ class MLP(linen.Module):
         return x
 
 
+class PosEmbed(linen.Module):
+    dtype: Any = jnp.float32
+
+    @linen.compact
+    def __call__(self, x):
+        _, L, C = x.shape
+        pos_emb_init = linen.initializers.normal(stddev=0.02)
+        pos_emb = self.param("pos_emb", pos_emb_init, (1, L, C))
+        pos_emb = linen.dtypes.promote_dtype(pos_emb, dtype=self.dtype)[0]
+        x = x + pos_emb
+        return x
+
+
 class PatchEmbed(linen.Module):
     r"""Image to Patch Embedding
 
@@ -107,43 +120,55 @@ class VisionTransformer(linen.Module):
     layer_norm_eps: float = 1e-5
     dtype: Any = jnp.float32
 
-    @linen.compact
-    def __call__(self, x, train: bool = False):
+    def setup(self):
         norm_layer = partial(
             self.norm_layer,
             epsilon=self.layer_norm_eps,
             dtype=self.dtype,
         )
 
+        self.patch_embed = PatchEmbed(
+            patch_size=self.patch_size,
+            embed_dim=self.embed_dim,
+            dtype=self.dtype,
+        )
+
+        self.pos_emb = PosEmbed(dtype=self.dtype)
+
         # stochastic depth with linear decay
         dpr = np.linspace(0, self.drop_path_rate, self.num_layers)
         dpr = [float(x) for x in dpr]
 
-        x = PatchEmbed(
-            patch_size=self.patch_size,
-            embed_dim=self.embed_dim,
-            dtype=self.dtype,
-        )(x)
-
-        pos_emb_init = linen.initializers.normal(stddev=0.02)
-        pos_emb = self.param("pos_emb", pos_emb_init, (1, 1, self.embed_dim))
-        pos_emb = linen.dtypes.promote_dtype(pos_emb, dtype=self.dtype)[0]
-        x = x + pos_emb
-
+        vit_body = []
         for i in range(self.num_layers):
-            x = VisionTransformerBlock(
+            layer = VisionTransformerBlock(
                 mlp_dim=self.mlp_dim,
                 num_heads=self.num_heads,
                 drop_path_ratio=dpr[i],
                 norm_layer=norm_layer,
                 dtype=self.dtype,
-            )(x, train=train)
+            )
+            vit_body.append(layer)
+        self.vit_body = vit_body
 
-        x = norm_layer(name="norm_layer")(x)
+        self.norm = norm_layer()
+        self.head = (
+            linen.Dense(self.num_classes, dtype=self.dtype)
+            if self.num_classes > 0
+            else lambda x: x
+        )
+
+    def __call__(self, x, train: bool = False):
+        x = self.patch_embed(x)
+
+        x = self.pos_emb(x)
+
+        for layer in self.vit_body:
+            x = layer(x, train=train)
+
+        x = self.norm(x)
         x = jnp.mean(x, axis=(1,))
-
-        if self.num_classes > 0:
-            x = linen.Dense(self.num_classes, name="head", dtype=self.dtype)(x)
+        x = self.head(x)
         return x
 
 
