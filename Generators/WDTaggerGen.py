@@ -69,13 +69,22 @@ class DataGenerator:
         labels = tf.reduce_max(one_hots, axis=0)
         labels = tf.cast(labels, tf.float32)
 
-        return image_tensor, labels
+        sample = {
+            "image_ids": parsed_example["image_id"],
+            "images": image_tensor,
+            "labels": labels,
+        }
+        return sample
 
-    def random_flip(self, image, labels):
+    def random_flip(self, sample):
+        image = sample["images"]
         image = tf.image.random_flip_left_right(image)
-        return image, labels
 
-    def random_crop(self, image, labels):
+        sample["images"] = image
+        return sample
+
+    def random_crop(self, sample):
+        image = sample["images"]
         image_shape = tf.shape(image)
         height = image_shape[0]
         width = image_shape[1]
@@ -104,9 +113,12 @@ class DataGenerator:
             new_height,
             new_width,
         )
-        return image, labels
 
-    def random_rotate(self, images, labels):
+        sample["images"] = image
+        return sample
+
+    def random_rotate(self, sample):
+        images = sample["images"]
         bs, h, w, c = tf.unstack(tf.shape(images))
 
         h = tf.cast(h, tf.float32)
@@ -139,9 +151,12 @@ class DataGenerator:
             interpolation="BILINEAR",
             fill_mode="CONSTANT",
         )
-        return images, labels
 
-    def resize(self, image, labels):
+        sample["images"] = images
+        return sample
+
+    def resize(self, sample):
+        image = sample["images"]
         if self.random_resize_method:
             # During training mix algos up to make the model a bit more more resilient
             # to the different image resizing implementations out there (TF, OpenCV, PIL, ...)
@@ -175,10 +190,12 @@ class DataGenerator:
                 antialias=True,
             )
         image = tf.cast(tf.clip_by_value(image, 0, 255), tf.uint8)
-        return image, labels
+
+        sample["images"] = image
+        return sample
 
     # https://github.com/tensorflow/tpu/blob/master/models/official/efficientnet/autoaugment.py
-    def cutout(self, image, labels):
+    def cutout(self, sample):
         """Apply cutout (https://arxiv.org/abs/1708.04552) to image.
         This operation applies a (2*pad_size x 2*pad_size) mask of zeros to
         a random location within `img`. The pixel values filled in will be of the
@@ -194,6 +211,7 @@ class DataGenerator:
         Returns:
           An image Tensor that is of type uint8.
         """
+        image = sample["images"]
         pad_pct = self.cutout_max_pct
         replace = self.cutout_replace
 
@@ -241,9 +259,13 @@ class DataGenerator:
             tf.ones_like(image, dtype=image.dtype) * replace,
             image,
         )
-        return image, labels
 
-    def mixup_single(self, images, labels):
+        sample["images"] = image
+        return sample
+
+    def mixup_single(self, sample):
+        images = sample["images"]
+        labels = sample["labels"]
         alpha = self.mixup_alpha
         batch_size = tf.shape(images)[0]
 
@@ -267,7 +289,10 @@ class DataGenerator:
         labels = labels_one * y_l + labels_two * (1 - y_l)
 
         images = tf.cast(tf.clip_by_value(images, 0, 255), tf.uint8)
-        return images, labels
+
+        sample["images"] = images
+        sample["labels"] = labels
+        return sample
 
     def genDS(self):
         files = tf.data.Dataset.list_files(self.records_path)
@@ -324,10 +349,11 @@ class DataGenerator:
             )
 
         dataset = dataset.map(
-            lambda images, labels: (
+            lambda sample: (
                 {
-                    "images": tf.cast(images, tf.float32) * (1.0 / 127.5) - 1,
-                    "labels": labels,
+                    "image_ids": sample["image_ids"],
+                    "images": tf.cast(sample["images"], tf.float32) * (1.0 / 127.5) - 1,
+                    "labels": sample["labels"],
                 }
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
