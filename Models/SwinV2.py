@@ -426,11 +426,9 @@ class PatchMerging(linen.Module):
 
     Args:
         input_resolution (tuple[int]): Resolution of input feature.
-        dim (int): Number of input channels.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
     input_resolution: Tuple[int]
-    dim: int
     norm_layer: Callable = linen.LayerNorm
     dtype: Any = jnp.float32
 
@@ -442,16 +440,11 @@ class PatchMerging(linen.Module):
         H, W = self.input_resolution
         B, L, C = x.shape
 
-        x = jnp.reshape(x, (B, H, W, C))
+        x = jnp.reshape(x, (B, H // 2, 2, W // 2, 2, C))  # B H/2 nH W/2 nW C
+        x = jnp.transpose(x, (0, 1, 3, 4, 2, 5))  # B H/2 W/2 nW nH C
+        x = jnp.reshape(x, (B, (H // 2) * (W // 2), 4 * C))  # B H/2*W/2 4*C
 
-        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
-        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
-        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
-        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
-        x = jnp.concatenate([x0, x1, x2, x3], axis=-1)  # B H/2 W/2 4*C
-        x = jnp.reshape(x, (B, -1, 4 * C))  # B H/2*W/2 4*C
-
-        x = linen.Dense(2 * self.dim, use_bias=False, dtype=self.dtype)(x)
+        x = linen.Dense(2 * C, use_bias=False, dtype=self.dtype)(x)
         x = self.norm_layer()(x)
 
         return x
@@ -527,7 +520,6 @@ class BasicLayer(linen.Module):
         if self.downsample is not None:
             x = self.downsample(
                 self.input_resolution,
-                dim=self.dim,
                 norm_layer=self.norm_layer,
                 dtype=self.dtype,
             )(x)
