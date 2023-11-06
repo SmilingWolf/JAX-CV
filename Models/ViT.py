@@ -30,7 +30,7 @@ class PosEmbed(linen.Module):
     @linen.compact
     def __call__(self, x):
         _, L, C = x.shape
-        pos_emb_init = linen.initializers.normal(stddev=0.02)
+        pos_emb_init = linen.initializers.normal(stddev=1 / np.sqrt(C))
         pos_emb = self.param("pos_emb", pos_emb_init, (1, L, C))
         pos_emb = linen.dtypes.promote_dtype(pos_emb, dtype=self.dtype)[0]
         x = x + pos_emb
