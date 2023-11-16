@@ -6,6 +6,7 @@ import einops
 import jax.numpy as jnp
 from flax import linen
 
+from .HiViT import HierarchicalViT
 from .SwinV2 import SwinTransformerV2
 from .ViT import VisionTransformer
 
@@ -141,6 +142,36 @@ class VisionTransformerForSimMIM(VisionTransformer):
         return self.patch_size
 
 
+class HierarchicalViTForSimMIM(HierarchicalViT):
+    def setup(self):
+        super().setup()
+
+        token_init = linen.initializers.normal(0.02)
+        self.mask_token = self.param("mask_token", token_init, (1, 1, self.embed_dim))
+
+    def __call__(self, x, mask, train: bool = False):
+        x = self.patch_embed(x)
+
+        B, L, _ = x.shape
+        H = W = int(L**0.5)
+        mask_token = linen.dtypes.promote_dtype(self.mask_token, dtype=self.dtype)[0]
+        mask_tokens = jnp.broadcast_to(mask_token, (B, L, self.embed_dim))
+        mask = jnp.reshape(mask, (B, H, W, 1)).astype(mask_tokens.dtype)
+        mask = self.patch_embed.patches_reshape(mask)
+        x = x * (1.0 - mask) + mask_tokens * mask
+
+        for layer in self.vit_body:
+            x = layer(x, train=train)
+
+        B, L, C = x.shape
+        H = W = int(L**0.5)
+        x = jnp.reshape(x, (B, H, W, C))
+        return x
+
+    def get_stride(self):
+        return 16
+
+
 class SimMIM(linen.Module):
     encoder: linen.Module = SwinTransformerV2ForSimMIM
     encoder_stride: int = 32
@@ -267,6 +298,40 @@ def simmim_vit_base():
     config = {
         "encoder": encoder,
         "encoder_stride": encoder.patch_size,
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_hivit_tiny():
+    config = {
+        "depths": (1, 1, 10),
+        "embed_dim": 96,
+        "mlp_ratio": (3.0, 3.0, 4.0),
+        "num_heads": (None, None, 6),
+    }
+    encoder = HierarchicalViTForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_hivit_small(**kwargs):
+    config = {
+        "depths": (2, 2, 20),
+        "embed_dim": 96,
+        "mlp_ratio": (3.0, 3.0, 4.0),
+        "num_heads": (None, None, 6),
+    }
+    encoder = HierarchicalViTForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
         "patch_size": encoder.patch_size,
     }
     return SimMIM(**config)
