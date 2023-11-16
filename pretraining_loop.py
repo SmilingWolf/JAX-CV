@@ -26,7 +26,7 @@ class Metrics(metrics.Collection):
 
 class TrainState(train_state.TrainState):
     metrics: Metrics
-    pt_constants: Any
+    constants: Any
 
 
 def create_train_state(
@@ -47,7 +47,8 @@ def create_train_state(
         train=False,
     )
     params = variables["params"]
-    pt_constants = variables["simmim_constants"]
+    del variables["params"]
+    constants = variables
 
     loss = metrics.Average.from_output("loss")
     collection = Metrics.create(loss=loss)
@@ -64,7 +65,7 @@ def create_train_state(
         params=params,
         tx=tx,
         metrics=collection.empty(),
-        pt_constants=pt_constants,
+        constants=constants,
     )
 
 
@@ -72,12 +73,9 @@ def train_step(state, batch, dropout_key):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
-    def loss_fn(params, pt_constants):
+    def loss_fn(params, **kwargs):
         loss, _ = state.apply_fn(
-            {
-                "params": params,
-                "simmim_constants": pt_constants,
-            },
+            {"params": params, **kwargs},
             batch["images"],
             mask=batch["masks"],
             train=True,
@@ -86,7 +84,7 @@ def train_step(state, batch, dropout_key):
         return loss
 
     grad_fn = jax.value_and_grad(loss_fn)
-    loss, grads = grad_fn(state.params, state.pt_constants)
+    loss, grads = grad_fn(state.params, **state.constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
@@ -98,10 +96,7 @@ def train_step(state, batch, dropout_key):
 
 def eval_step(*, state, batch):
     loss, _ = state.apply_fn(
-        {
-            "params": state.params,
-            "simmim_constants": state.pt_constants,
-        },
+        {"params": state.params, **state.constants},
         batch["images"],
         mask=batch["masks"],
         train=False,
@@ -113,13 +108,18 @@ def eval_step(*, state, batch):
     return state
 
 
-parser = argparse.ArgumentParser(description="Train a network")
-parser.add_argument(
+model_parser = argparse.ArgumentParser(
+    description="Model variant to train",
+    add_help=False,
+)
+model_parser.add_argument(
     "--model-name",
     default="simmim_vit_small",
     help="Model variant to train",
     type=str,
 )
+
+parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
     "--run-name",
     default=None,
@@ -133,7 +133,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--restore-params-ckpt",
-    default=None,
+    default="",
     help="Restore the parameters from the last step of the given orbax checkpoint. Must be an absolute path. WARNING: restores params only!",
     type=str,
 )
@@ -198,17 +198,6 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
-    "--dropout-rate",
-    default=0.1,
-    help="Stochastic depth rate",
-    type=float,
-)
-parser.add_argument(
-    "--windowed-norm",
-    action="store_true",
-    help="Use windowed norm of input images as reconstruction target in SimMIM",
-)
-parser.add_argument(
     "--mixup-alpha",
     default=0.8,
     help="MixUp alpha",
@@ -232,10 +221,13 @@ parser.add_argument(
     help="Number of cutout patches",
     type=int,
 )
-args = parser.parse_args()
+model_arg, remaining = model_parser.parse_known_args()
 
-model_name = args.model_name
-model_builder = Models.model_registry[model_name]
+model_name = model_arg.model_name
+model_builder = Models.model_registry[model_name]()
+parser = model_builder.extend_parser(parser=parser)
+
+args = parser.parse_args(remaining)
 
 run_name = args.run_name
 if run_name is None:
@@ -254,6 +246,7 @@ warmup_epochs = args.warmup_epochs
 batch_size = args.batch_size
 compute_units = jax.device_count()
 global_batch_size = batch_size * compute_units
+restore_params_ckpt = args.restore_params_ckpt
 
 # Dataset params
 image_size = args.image_size
@@ -265,8 +258,6 @@ val_samples = dataset_specs["val_samples"]
 patch_size = args.patch_size
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
-dropout_rate = args.dropout_rate
-windowed_norm_enabled = args.windowed_norm
 
 # Augmentations hyperparams
 noise_level = 2
@@ -297,8 +288,6 @@ train_config["val_samples"] = val_samples
 train_config["patch_size"] = patch_size
 train_config["learning_rate"] = learning_rate
 train_config["weight_decay"] = weight_decay
-train_config["dropout_rate"] = dropout_rate
-train_config["windowed_norm_enabled"] = windowed_norm_enabled
 train_config["noise_level"] = noise_level
 train_config["mixup_alpha"] = mixup_alpha
 train_config["rotation_ratio"] = rotation_ratio
@@ -308,7 +297,15 @@ train_config["random_resize_method"] = random_resize_method
 train_config["mask_patch_size"] = mask_patch_size
 train_config["model_patch_size"] = model_patch_size
 train_config["mask_input_size"] = mask_input_size
-train_config["restore_params_ckpt"] = args.restore_params_ckpt or ""
+train_config["restore_params_ckpt"] = restore_params_ckpt
+
+# Add model specific arguments to WandB dict
+args_dict = vars(args)
+model_config = {key: args_dict[key] for key in args_dict if key not in train_config}
+del model_config["wandb_tags"]
+del model_config["run_name"]
+del model_config["epochs"]
+train_config.update(model_config)
 
 # WandB tracking
 wandb.init(
@@ -362,12 +359,13 @@ validation_generator = DataGenerator(
 val_ds = validation_generator.genDS()
 val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
 
-model = model_builder(
+model = model_builder.build(
+    config=model_builder,
+    image_size=image_size,
     patch_size=patch_size,
     num_classes=num_classes,
-    drop_path_rate=dropout_rate,
-    windowed_norm_enabled=windowed_norm_enabled,
     dtype=jnp.bfloat16,
+    **model_config,
 )
 # tab_img = jnp.ones([1, image_size, image_size, 3])
 # tab_mask = jnp.ones([1, mask_input_size, mask_input_size])
@@ -393,14 +391,7 @@ state = create_train_state(
 )
 del params_key
 
-metrics_history = {
-    "train_loss": [],
-    "train_f1score": [],
-    "train_mcc": [],
-    "val_loss": [],
-    "val_f1score": [],
-    "val_mcc": [],
-}
+metrics_history = {"train_loss": [], "val_loss": []}
 ckpt = {"model": state, "metrics_history": metrics_history}
 
 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
@@ -416,9 +407,9 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
-if args.restore_params_ckpt is not None:
+if restore_params_ckpt:
     throwaway_manager = orbax.checkpoint.CheckpointManager(
-        args.restore_params_ckpt,
+        restore_params_ckpt,
         orbax_checkpointer,
     )
     latest_epoch = throwaway_manager.latest_step()
@@ -445,7 +436,7 @@ for step, batch in enumerate(train_ds):
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
 
-    if step % 256 == 0:
+    if step % 224 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
         pbar.set_postfix(loss=f"{merged_metrics.loss.compute():.04f}")
 

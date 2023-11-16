@@ -1,3 +1,4 @@
+import dataclasses
 from functools import partial
 from typing import Any, Tuple
 
@@ -10,7 +11,6 @@ from .ViT import VisionTransformer
 
 
 class WindowedNorm(linen.Module):
-    enabled: bool
     target_size: Tuple[int]
     window_size: int = 47
 
@@ -42,9 +42,6 @@ class WindowedNorm(linen.Module):
         ).value
 
     def __call__(self, targets):
-        if not self.enabled:
-            return targets
-
         window_size = self.window_size
 
         window_shape = (window_size, window_size)
@@ -92,8 +89,8 @@ class SwinTransformerV2ForSimMIM(SwinTransformerV2):
         x = self.patch_embed(x)
 
         B, L, _ = x.shape
-
-        mask_tokens = jnp.broadcast_to(self.mask_token, (B, L, self.embed_dim))
+        mask_token = linen.dtypes.promote_dtype(self.mask_token, dtype=self.dtype)[0]
+        mask_tokens = jnp.broadcast_to(mask_token, (B, L, self.embed_dim))
         mask = jnp.reshape(mask, (B, L, 1)).astype(mask_tokens.dtype)
         x = x * (1.0 - mask) + mask_tokens * mask
 
@@ -108,6 +105,9 @@ class SwinTransformerV2ForSimMIM(SwinTransformerV2):
         H = W = int(L**0.5)
         x = jnp.reshape(x, (B, H, W, C))
         return x
+
+    def get_stride(self):
+        return self.patch_size * 2 ** (len(self.depths) - 1)
 
 
 class VisionTransformerForSimMIM(VisionTransformer):
@@ -137,15 +137,17 @@ class VisionTransformerForSimMIM(VisionTransformer):
         x = jnp.reshape(x, (B, H, W, C))
         return x
 
+    def get_stride(self):
+        return self.patch_size
+
 
 class SimMIM(linen.Module):
-    encoder: linen.Module
-    encoder_stride: int
+    encoder: linen.Module = SwinTransformerV2ForSimMIM
+    encoder_stride: int = 32
 
-    patch_size: int
-    in_chans: int = 3
+    patch_size: int = 4
 
-    norm_targets_enabled: bool = False
+    enable_windowed_norm: bool = False
     norm_patch_size: int = 47
 
     dtype: Any = jnp.float32
@@ -175,99 +177,96 @@ class SimMIM(linen.Module):
         )
 
         B, H, W, C = x.shape
-        wn = WindowedNorm(
-            target_size=(H, W),
-            window_size=self.norm_patch_size,
-            enabled=self.norm_targets_enabled,
-        )
-        x = wn(x)
+        if self.enable_windowed_norm:
+            x = WindowedNorm(target_size=(H, W), window_size=self.norm_patch_size)(x)
 
         x_rec = linen.dtypes.promote_dtype(x_rec, dtype=x.dtype)[0]
         loss_recon = jnp.abs(x - x_rec)
-        loss = jnp.sum(loss_recon * mask) / (jnp.sum(mask) + 1e-5) / self.in_chans
+        loss = jnp.sum(loss_recon * mask) / (jnp.sum(mask) + 1e-5) / C
 
         return loss, x_rec
 
+    @classmethod
+    def build(cls, config, **kwargs):
+        encoder = config.encoder.build(config.encoder, **kwargs)
 
-def simmim_swinv2_tiny_window8_256(**kwargs):
-    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+        config = dataclasses.asdict(config)
+        config = {key: kwargs[key] if key in kwargs else config[key] for key in config}
+        config["encoder"] = encoder
+        config["encoder_stride"] = encoder.get_stride()
+        return cls(**config)
 
-    encoder = partial(
-        SwinTransformerV2ForSimMIM,
-        embed_dim=96,
-        window_size=8,
-        depths=(2, 2, 6, 2),
-        num_heads=(3, 6, 12, 24),
-    )
-    encoder = encoder(**kwargs)
-    model = SimMIM(
-        encoder,
-        32,
-        encoder.patch_size,
-        norm_targets_enabled=norm_targets_enabled,
-        dtype=encoder.dtype,
-    )
-    return model
+    def extend_parser(self, parser):
+        parser = self.encoder.extend_parser(parser)
+        parser.add_argument(
+            "--enable-windowed-norm",
+            action="store_true",
+            help="Use windowed norm of input images as reconstruction target in SimMIM",
+        )
+        return parser
 
 
-def simmim_swinv2_base_window8_256(**kwargs):
-    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+def simmim_swinv2_tiny():
+    config = {
+        "embed_dim": 96,
+        "depths": (2, 2, 6, 2),
+        "num_heads": (3, 6, 12, 24),
+    }
+    encoder = SwinTransformerV2ForSimMIM(**config)
 
-    encoder = partial(
-        SwinTransformerV2ForSimMIM,
-        embed_dim=128,
-        window_size=8,
-        depths=(2, 2, 18, 2),
-        num_heads=(4, 8, 16, 32),
-    )
-    encoder = encoder(**kwargs)
-    model = SimMIM(
-        encoder,
-        32,
-        encoder.patch_size,
-        norm_targets_enabled=norm_targets_enabled,
-        dtype=encoder.dtype,
-    )
-    return model
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
 
 
-def simmim_vit_small(**kwargs):
-    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+def simmim_swinv2_base():
+    config = {
+        "embed_dim": 128,
+        "depths": (2, 2, 18, 2),
+        "num_heads": (4, 8, 16, 32),
+    }
+    encoder = SwinTransformerV2ForSimMIM(**config)
 
-    encoder = partial(
-        VisionTransformerForSimMIM,
-        num_layers=12,
-        embed_dim=384,
-        mlp_dim=1536,
-        num_heads=6,
-    )
-    encoder = encoder(**kwargs)
-    model = SimMIM(
-        encoder,
-        encoder.patch_size,
-        encoder.patch_size,
-        norm_targets_enabled=norm_targets_enabled,
-        dtype=encoder.dtype,
-    )
-    return model
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
 
 
-def simmim_vit_base(**kwargs):
-    norm_targets_enabled = kwargs.pop("windowed_norm_enabled", False)
+def simmim_vit_small():
+    config = {
+        "num_layers": 12,
+        "embed_dim": 384,
+        "mlp_dim": 1536,
+        "num_heads": 6,
+    }
+    encoder = VisionTransformerForSimMIM(**config)
 
-    encoder = partial(
-        VisionTransformerForSimMIM,
-        num_layers=12,
-        embed_dim=768,
-        mlp_dim=3072,
-        num_heads=12,
-    )
-    encoder = encoder(**kwargs)
-    model = SimMIM(
-        encoder,
-        encoder.patch_size,
-        encoder.patch_size,
-        norm_targets_enabled=norm_targets_enabled,
-        dtype=encoder.dtype,
-    )
-    return model
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_vit_base():
+    config = {
+        "num_layers": 12,
+        "embed_dim": 768,
+        "mlp_dim": 3072,
+        "num_heads": 12,
+    }
+    encoder = VisionTransformerForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.patch_size,
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)

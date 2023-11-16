@@ -1,3 +1,4 @@
+import dataclasses
 from functools import partial
 from typing import Any, Callable, Tuple, Union
 
@@ -114,15 +115,14 @@ class RelativePositionBias(linen.Module):
 
     def __call__(self, x):
         relative_position_bias_table = self.cpb_mlp(self.relative_coords_table)
+        rpe_index = jnp.reshape(self.relative_position_index, (-1,))
 
         # Wh*Ww,Wh*Ww,nH
         relative_position_bias_table = jnp.reshape(
             relative_position_bias_table, (-1, self.num_heads)
         )
         relative_position_bias = jnp.reshape(
-            relative_position_bias_table[
-                jnp.reshape(self.relative_position_index, (-1,))
-            ],
+            relative_position_bias_table[rpe_index],
             (
                 self.window_size[0] * self.window_size[1],
                 self.window_size[0] * self.window_size[1],
@@ -562,7 +562,7 @@ class SwinTransformerV2(linen.Module):
           https://arxiv.org/pdf/2103.14030
 
     Args:
-        img_size (int | tuple(int)): Input image size. Default 224
+        image_size (int | tuple(int)): Input image size. Default 224
         patch_size (int | tuple(int)): Patch size. Default: 4
         in_chans (int): Number of input image channels. Default: 3
         num_classes (int): Number of classes for classification head. Default: 1000
@@ -580,7 +580,7 @@ class SwinTransformerV2(linen.Module):
         pretrained_window_sizes (tuple(int)): Pretrained window sizes of each layer.
     """
 
-    img_size: int = 224
+    image_size: int = 224
     patch_size: int = 4
     in_chans: int = 3
     num_classes: int = 1000
@@ -615,7 +615,7 @@ class SwinTransformerV2(linen.Module):
             dtype=self.dtype,
         )
 
-        patch_resolution = self.img_size // self.patch_size
+        patch_resolution = self.image_size // self.patch_size
         patches_resolution = [patch_resolution, patch_resolution]
 
         # split image into non-overlapping patches
@@ -675,26 +675,51 @@ class SwinTransformerV2(linen.Module):
         x = self.head(x)
         return x
 
+    @classmethod
+    def build(cls, config, **kwargs):
+        config = dataclasses.asdict(config)
+        config = {key: kwargs[key] if key in kwargs else config[key] for key in config}
+        return cls(**config)
 
-def swinv2_tiny_window8_256(**kwargs):
-    model = partial(
-        SwinTransformerV2,
-        embed_dim=96,
-        window_size=8,
-        depths=(2, 2, 6, 2),
-        num_heads=(3, 6, 12, 24),
-    )
-    model = model(**kwargs)
-    return model
+    def extend_parser(self, parser):
+        parser.set_defaults(image_size=self.image_size)
+        parser.set_defaults(patch_size=self.patch_size)
+        parser.add_argument(
+            "--window-size",
+            default=self.window_size,
+            help="SwinV2 window size",
+            type=int,
+        )
+        parser.add_argument(
+            "--drop-path-rate",
+            default=self.drop_path_rate,
+            help="Stochastic depth rate",
+            type=float,
+        )
+        return parser
+
+    @staticmethod
+    def get_simmim_orbax_txs():
+        # SimMIM checkpoint have no head params - don't try to restore them.
+        # All the other params we care about are under the "encoder" subsection
+        regex = r"(?!model/params/head)model/params/(.*)"
+        action = r"model/params/encoder/\1"
+        return [(regex, action)]
 
 
-def swinv2_base_window8_256(**kwargs):
-    model = partial(
-        SwinTransformerV2,
-        embed_dim=128,
-        window_size=8,
-        depths=(2, 2, 18, 2),
-        num_heads=(4, 8, 16, 32),
-    )
-    model = model(**kwargs)
-    return model
+def swinv2_tiny():
+    config = {
+        "embed_dim": 96,
+        "depths": (2, 2, 6, 2),
+        "num_heads": (3, 6, 12, 24),
+    }
+    return SwinTransformerV2(**config)
+
+
+def swinv2_base(**kwargs):
+    config = {
+        "embed_dim": 128,
+        "depths": (2, 2, 18, 2),
+        "num_heads": (4, 8, 16, 32),
+    }
+    return SwinTransformerV2(**config)
