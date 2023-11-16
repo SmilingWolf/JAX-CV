@@ -1,3 +1,4 @@
+import dataclasses
 from functools import partial
 from typing import Any, Callable
 
@@ -105,7 +106,7 @@ class VisionTransformerBlock(linen.Module):
 
 
 class VisionTransformer(linen.Module):
-    patch_size: int
+    patch_size: int = 16
     num_classes: int = 1000
 
     num_layers: int = 12
@@ -171,38 +172,56 @@ class VisionTransformer(linen.Module):
         x = self.head(x)
         return x
 
+    @classmethod
+    def build(cls, config, **kwargs):
+        config = dataclasses.asdict(config)
+        config = {key: kwargs[key] if key in kwargs else config[key] for key in config}
+        return cls(**config)
 
-def vit_small(**kwargs):
-    model = partial(
-        VisionTransformer,
-        num_layers=12,
-        embed_dim=384,
-        mlp_dim=1536,
-        num_heads=6,
-    )
-    model = model(**kwargs)
-    return model
+    def extend_parser(self, parser):
+        parser.set_defaults(patch_size=self.patch_size)
+        parser.add_argument(
+            "--drop-path-rate",
+            default=self.drop_path_rate,
+            help="Stochastic depth rate",
+            type=float,
+        )
+        return parser
+
+    @staticmethod
+    def get_simmim_orbax_txs():
+        # SimMIM checkpoint have no head params - don't try to restore them.
+        # All the other params we care about are under the "encoder" subsection
+        regex = r"(?!model/params/head)model/params/(.*)"
+        action = r"model/params/encoder/\1"
+        return [(regex, action)]
 
 
-def vit_base(**kwargs):
-    model = partial(
-        VisionTransformer,
-        num_layers=12,
-        embed_dim=768,
-        mlp_dim=3072,
-        num_heads=12,
-    )
-    model = model(**kwargs)
-    return model
+def vit_small():
+    config = {
+        "num_layers": 12,
+        "embed_dim": 384,
+        "mlp_dim": 1536,
+        "num_heads": 6,
+    }
+    return VisionTransformer(**config)
 
 
-def vit_large(**kwargs):
-    model = partial(
-        VisionTransformer,
-        num_layers=24,
-        embed_dim=1024,
-        mlp_dim=4096,
-        num_heads=16,
-    )
-    model = model(**kwargs)
-    return model
+def vit_base():
+    config = {
+        "num_layers": 12,
+        "embed_dim": 768,
+        "mlp_dim": 3072,
+        "num_heads": 12,
+    }
+    return VisionTransformer(**config)
+
+
+def vit_large():
+    config = {
+        "num_layers": 24,
+        "embed_dim": 1024,
+        "mlp_dim": 4096,
+        "num_heads": 16,
+    }
+    return VisionTransformer(**config)

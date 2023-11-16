@@ -32,6 +32,30 @@ class TrainState(train_state.TrainState):
     constants: Any
 
 
+def create_optimizer_tx(
+    params,
+    learning_rate: Union[float, Callable],
+    weight_decay: float,
+    freeze_model_body: bool,
+):
+    def should_decay(path, _):
+        is_kernel = path[-1].key == "kernel"
+        is_cpb = "attention_bias" in [x.key for x in path]
+        return is_kernel and not is_cpb
+
+    def should_freeze(path, _):
+        return "trainable" if "head" in path else "frozen"
+
+    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
+    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
+
+    if freeze_model_body:
+        partition_optimizers = {"trainable": tx, "frozen": optax.set_to_zero()}
+        param_partitions = flax.traverse_util.path_aware_map(should_freeze, params)
+        tx = optax.multi_transform(partition_optimizers, param_partitions)
+    return tx
+
+
 def create_train_state(
     module,
     params_key,
@@ -39,6 +63,7 @@ def create_train_state(
     num_classes: int,
     learning_rate: Union[float, Callable],
     weight_decay: float,
+    freeze_model_body: bool = False,
 ):
     """Creates an initial 'TrainState'."""
     # initialize parameters by passing a template image
@@ -48,7 +73,8 @@ def create_train_state(
         train=False,
     )
     params = variables["params"]
-    constants = variables["swinv2_constants"]
+    del variables["params"]
+    constants = variables
 
     loss = metrics.Average.from_output("loss")
     f1score_metric = f1score(
@@ -65,13 +91,8 @@ def create_train_state(
     )
     collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
 
-    def should_decay(path, _):
-        is_kernel = path[-1].key == "kernel"
-        is_cpb = "attention_bias" in [x.key for x in path]
-        return is_kernel and not is_cpb
+    tx = create_optimizer_tx(params, learning_rate, weight_decay, freeze_model_body)
 
-    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
-    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
     return TrainState.create(
         apply_fn=module.apply,
         params=params,
@@ -85,9 +106,9 @@ def train_step(state, batch, dropout_key):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
-    def loss_fn(params, constants):
+    def loss_fn(params, **kwargs):
         logits = state.apply_fn(
-            {"params": params, "swinv2_constants": constants},
+            {"params": params, **kwargs},
             batch["images"],
             train=True,
             rngs={"dropout": dropout_train_key},
@@ -97,7 +118,7 @@ def train_step(state, batch, dropout_key):
         return loss, logits
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, logits), grads = grad_fn(state.params, state.constants)
+    (loss, logits), grads = grad_fn(state.params, **state.constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
@@ -113,7 +134,7 @@ def train_step(state, batch, dropout_key):
 
 def eval_step(*, state, batch):
     logits = state.apply_fn(
-        {"params": state.params, "swinv2_constants": state.constants},
+        {"params": state.params, **state.constants},
         batch["images"],
         train=False,
     )
@@ -130,13 +151,18 @@ def eval_step(*, state, batch):
     return state
 
 
-parser = argparse.ArgumentParser(description="Train a network")
-parser.add_argument(
+model_parser = argparse.ArgumentParser(
+    description="Model variant to train",
+    add_help=False,
+)
+model_parser.add_argument(
     "--model-name",
-    default="swinv2_tiny",
+    default="vit_small",
     help="Model variant to train",
     type=str,
 )
+
+parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
     "--run-name",
     default=None,
@@ -150,9 +176,20 @@ parser.add_argument(
 )
 parser.add_argument(
     "--restore-params-ckpt",
-    default=None,
+    default="",
     help="Restore the parameters from the last step of the given orbax checkpoint. Must be an absolute path. WARNING: restores params only!",
     type=str,
+)
+parser.add_argument(
+    "--restore-simmim-ckpt",
+    default="",
+    help="Restore the parameters from the last step of the given SimMIM-pretrained orbax checkpoint. Must be an absolute path",
+    type=str,
+)
+parser.add_argument(
+    "--freeze-model-body",
+    action="store_true",
+    help="Freeze the feature extraction layers, train classifier head only",
 )
 parser.add_argument(
     "--dataset-file",
@@ -197,6 +234,12 @@ parser.add_argument(
     type=int,
 )
 parser.add_argument(
+    "--patch-size",
+    default=16,
+    help="Size of the image patches",
+    type=int,
+)
+parser.add_argument(
     "--learning-rate",
     default=0.001,
     help="Max learning rate",
@@ -206,12 +249,6 @@ parser.add_argument(
     "--weight-decay",
     default=0.0001,
     help="Weight decay",
-    type=float,
-)
-parser.add_argument(
-    "--dropout-rate",
-    default=0.1,
-    help="Stochastic depth rate",
     type=float,
 )
 parser.add_argument(
@@ -238,10 +275,13 @@ parser.add_argument(
     help="Number of cutout patches",
     type=int,
 )
-args = parser.parse_args()
+model_arg, remaining = model_parser.parse_known_args()
 
-model_name = args.model_name
-model_builder = Models.model_registry[model_name]
+model_name = model_arg.model_name
+model_builder = Models.model_registry[model_name]()
+parser = model_builder.extend_parser(parser=parser)
+
+args = parser.parse_args(remaining)
 
 run_name = args.run_name
 if run_name is None:
@@ -260,6 +300,8 @@ warmup_epochs = args.warmup_epochs
 batch_size = args.batch_size
 compute_units = jax.device_count()
 global_batch_size = batch_size * compute_units
+restore_params_ckpt = args.restore_params_ckpt
+restore_simmim_ckpt = args.restore_simmim_ckpt
 
 # Dataset params
 image_size = args.image_size
@@ -268,11 +310,10 @@ train_samples = dataset_specs["train_samples"]
 val_samples = dataset_specs["val_samples"]
 
 # Model hyperparams
-window_ratio = 32
-window_size = image_size // window_ratio
+patch_size = args.patch_size
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
-dropout_rate = args.dropout_rate
+freeze_model_body = args.freeze_model_body
 
 # Augmentations hyperparams
 noise_level = 2
@@ -297,18 +338,26 @@ train_config["image_size"] = image_size
 train_config["num_classes"] = num_classes
 train_config["train_samples"] = train_samples
 train_config["val_samples"] = val_samples
-train_config["window_ratio"] = window_ratio
-train_config["window_size"] = window_size
+train_config["patch_size"] = patch_size
 train_config["learning_rate"] = learning_rate
 train_config["weight_decay"] = weight_decay
-train_config["dropout_rate"] = dropout_rate
 train_config["noise_level"] = noise_level
 train_config["mixup_alpha"] = mixup_alpha
 train_config["rotation_ratio"] = rotation_ratio
 train_config["cutout_max_pct"] = cutout_max_pct
 train_config["cutout_patches"] = cutout_patches
 train_config["random_resize_method"] = random_resize_method
-train_config["restore_params_ckpt"] = args.restore_params_ckpt or ""
+train_config["restore_params_ckpt"] = restore_params_ckpt
+train_config["restore_simmim_ckpt"] = restore_simmim_ckpt
+train_config["freeze_model_body"] = freeze_model_body
+
+# Add model specific arguments to WandB dict
+args_dict = vars(args)
+model_config = {key: args_dict[key] for key in args_dict if key not in train_config}
+del model_config["wandb_tags"]
+del model_config["run_name"]
+del model_config["epochs"]
+train_config.update(model_config)
 
 # WandB tracking
 wandb.init(
@@ -356,18 +405,16 @@ validation_generator = DataGenerator(
 val_ds = validation_generator.genDS()
 val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
 
-model = model_builder(
-    img_size=image_size,
+model = model_builder.build(
+    config=model_builder,
+    image_size=image_size,
+    patch_size=patch_size,
     num_classes=num_classes,
-    window_size=window_size,
-    drop_path_rate=dropout_rate,
     dtype=jnp.bfloat16,
+    **model_config,
 )
-# print(
-#     model.tabulate(
-#         jax.random.key(0), jnp.ones([1, image_size, image_size, 3]), train=False
-#     )
-# )
+# tab_img = jnp.ones([1, image_size, image_size, 3])
+# print(model.tabulate(jax.random.key(0), tab_img, train=False))
 
 num_steps_per_epoch = train_samples // global_batch_size
 learning_rate = optax.warmup_cosine_decay_schedule(
@@ -385,6 +432,7 @@ state = create_train_state(
     num_classes,
     learning_rate,
     weight_decay,
+    freeze_model_body,
 )
 del params_key
 
@@ -411,13 +459,25 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
-if args.restore_params_ckpt is not None:
+if restore_params_ckpt or restore_simmim_ckpt:
+    ckpt_path = restore_params_ckpt if restore_params_ckpt else restore_simmim_ckpt
+
     throwaway_manager = orbax.checkpoint.CheckpointManager(
-        args.restore_params_ckpt,
+        ckpt_path,
         orbax_checkpointer,
     )
     latest_epoch = throwaway_manager.latest_step()
-    restored = throwaway_manager.restore(latest_epoch, items=ckpt)
+    restored = throwaway_manager.restore(latest_epoch)
+
+    transforms = {}
+    if restore_simmim_ckpt:
+        tx_pairs = model.get_simmim_orbax_txs()
+        for tx_regex, tx_action in tx_pairs:
+            tx_action = orbax.checkpoint.Transform(original_key=tx_action)
+            transforms[tx_regex] = tx_action
+
+    restored = orbax.checkpoint.apply_transformations(restored, transforms, ckpt)
+
     state = state.replace(params=restored["model"].params)
     del throwaway_manager
 
@@ -440,7 +500,7 @@ for step, batch in enumerate(train_ds):
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
 
-    if step % 192 == 0:
+    if step % 224 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
         pbar.set_postfix(loss=f"{merged_metrics.loss.compute():.04f}")
 

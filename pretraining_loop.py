@@ -16,25 +16,24 @@ from flax.training import orbax_utils, train_state
 from tqdm import tqdm
 
 import Models
-from Generators.WDTaggerGen import DataGenerator
-from Metrics.ConfusionMatrix import f1score, mcc
+from Generators.SimMIMGen import DataGenerator
 
 
 @flax.struct.dataclass
 class Metrics(metrics.Collection):
     loss: metrics.Metric
-    f1score: metrics.Metric
-    mcc: metrics.Metric
 
 
 class TrainState(train_state.TrainState):
     metrics: Metrics
+    constants: Any
 
 
 def create_train_state(
     module,
     params_key,
     target_size: int,
+    mask_input_size: int,
     num_classes: int,
     learning_rate: Union[float, Callable],
     weight_decay: float,
@@ -44,28 +43,20 @@ def create_train_state(
     variables = module.init(
         params_key,
         jnp.ones([1, target_size, target_size, 3]),
+        mask=jnp.ones([1, mask_input_size, mask_input_size]),
         train=False,
     )
     params = variables["params"]
+    del variables["params"]
+    constants = variables
 
     loss = metrics.Average.from_output("loss")
-    f1score_metric = f1score(
-        threshold=0.4,
-        averaging="macro",
-        num_classes=num_classes,
-        from_logits=True,
-    )
-    mcc_metric = mcc(
-        threshold=0.4,
-        averaging="macro",
-        num_classes=num_classes,
-        from_logits=True,
-    )
-    collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
+    collection = Metrics.create(loss=loss)
 
     def should_decay(path, _):
         is_kernel = path[-1].key == "kernel"
-        return is_kernel
+        is_cpb = "attention_bias" in [x.key for x in path]
+        return is_kernel and not is_cpb
 
     wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
     tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
@@ -74,6 +65,7 @@ def create_train_state(
         params=params,
         tx=tx,
         metrics=collection.empty(),
+        constants=constants,
     )
 
 
@@ -81,58 +73,53 @@ def train_step(state, batch, dropout_key):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
-    def loss_fn(params):
-        logits = state.apply_fn(
-            {"params": params},
+    def loss_fn(params, **kwargs):
+        loss, _ = state.apply_fn(
+            {"params": params, **kwargs},
             batch["images"],
+            mask=batch["masks"],
             train=True,
             rngs={"dropout": dropout_train_key},
         )
-        loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
-        loss = loss.sum() / batch["labels"].shape[0]
-        return loss, logits
+        return loss
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, logits), grads = grad_fn(state.params)
+    grad_fn = jax.value_and_grad(loss_fn)
+    loss, grads = grad_fn(state.params, **state.constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
-    metric_updates = state.metrics.gather_from_model_output(
-        logits=logits,
-        labels=batch["labels"],
-        loss=loss,
-    )
+    metric_updates = state.metrics.gather_from_model_output(loss=loss)
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
     return state
 
 
 def eval_step(*, state, batch):
-    logits = state.apply_fn(
-        {"params": state.params},
+    loss, _ = state.apply_fn(
+        {"params": state.params, **state.constants},
         batch["images"],
+        mask=batch["masks"],
         train=False,
     )
 
-    loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
-    loss = loss.sum() / batch["labels"].shape[0]
-    metric_updates = state.metrics.gather_from_model_output(
-        logits=logits,
-        labels=batch["labels"],
-        loss=loss,
-    )
+    metric_updates = state.metrics.gather_from_model_output(loss=loss)
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
     return state
 
 
-parser = argparse.ArgumentParser(description="Train a network")
-parser.add_argument(
+model_parser = argparse.ArgumentParser(
+    description="Model variant to train",
+    add_help=False,
+)
+model_parser.add_argument(
     "--model-name",
-    default="vit_small",
+    default="simmim_vit_small",
     help="Model variant to train",
     type=str,
 )
+
+parser = argparse.ArgumentParser(description="Train a network")
 parser.add_argument(
     "--run-name",
     default=None,
@@ -146,7 +133,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--restore-params-ckpt",
-    default=None,
+    default="",
     help="Restore the parameters from the last step of the given orbax checkpoint. Must be an absolute path. WARNING: restores params only!",
     type=str,
 )
@@ -211,12 +198,6 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
-    "--dropout-rate",
-    default=0.1,
-    help="Stochastic depth rate",
-    type=float,
-)
-parser.add_argument(
     "--mixup-alpha",
     default=0.8,
     help="MixUp alpha",
@@ -240,10 +221,13 @@ parser.add_argument(
     help="Number of cutout patches",
     type=int,
 )
-args = parser.parse_args()
+model_arg, remaining = model_parser.parse_known_args()
 
-model_name = args.model_name
-model_builder = Models.model_registry[model_name]
+model_name = model_arg.model_name
+model_builder = Models.model_registry[model_name]()
+parser = model_builder.extend_parser(parser=parser)
+
+args = parser.parse_args(remaining)
 
 run_name = args.run_name
 if run_name is None:
@@ -262,10 +246,11 @@ warmup_epochs = args.warmup_epochs
 batch_size = args.batch_size
 compute_units = jax.device_count()
 global_batch_size = batch_size * compute_units
+restore_params_ckpt = args.restore_params_ckpt
 
 # Dataset params
 image_size = args.image_size
-num_classes = dataset_specs["num_classes"]
+num_classes = 0
 train_samples = dataset_specs["train_samples"]
 val_samples = dataset_specs["val_samples"]
 
@@ -273,7 +258,6 @@ val_samples = dataset_specs["val_samples"]
 patch_size = args.patch_size
 learning_rate = args.learning_rate
 weight_decay = args.weight_decay
-dropout_rate = args.dropout_rate
 
 # Augmentations hyperparams
 noise_level = 2
@@ -282,6 +266,9 @@ rotation_ratio = args.rotation_ratio
 cutout_max_pct = args.cutout_max_pct
 cutout_patches = args.cutout_patches
 random_resize_method = True
+mask_patch_size = 32
+model_patch_size = patch_size
+mask_input_size = image_size // model_patch_size
 
 # WandB tracking
 train_config = {}
@@ -301,14 +288,24 @@ train_config["val_samples"] = val_samples
 train_config["patch_size"] = patch_size
 train_config["learning_rate"] = learning_rate
 train_config["weight_decay"] = weight_decay
-train_config["dropout_rate"] = dropout_rate
 train_config["noise_level"] = noise_level
 train_config["mixup_alpha"] = mixup_alpha
 train_config["rotation_ratio"] = rotation_ratio
 train_config["cutout_max_pct"] = cutout_max_pct
 train_config["cutout_patches"] = cutout_patches
 train_config["random_resize_method"] = random_resize_method
-train_config["restore_params_ckpt"] = args.restore_params_ckpt or ""
+train_config["mask_patch_size"] = mask_patch_size
+train_config["model_patch_size"] = model_patch_size
+train_config["mask_input_size"] = mask_input_size
+train_config["restore_params_ckpt"] = restore_params_ckpt
+
+# Add model specific arguments to WandB dict
+args_dict = vars(args)
+model_config = {key: args_dict[key] for key in args_dict if key not in train_config}
+del model_config["wandb_tags"]
+del model_config["run_name"]
+del model_config["epochs"]
+train_config.update(model_config)
 
 # WandB tracking
 wandb.init(
@@ -337,6 +334,9 @@ training_generator = DataGenerator(
     cutout_max_pct=cutout_max_pct,
     cutout_patches=cutout_patches,
     random_resize_method=random_resize_method,
+    mask_patch_size=mask_patch_size,
+    model_patch_size=model_patch_size,
+    mask_ratio=0.6,
 )
 train_ds = training_generator.genDS()
 train_ds = jax_utils.prefetch_to_device(train_ds.as_numpy_iterator(), size=2)
@@ -352,18 +352,24 @@ validation_generator = DataGenerator(
     rotation_ratio=0.0,
     cutout_max_pct=0.0,
     random_resize_method=False,
+    mask_patch_size=mask_patch_size,
+    model_patch_size=model_patch_size,
+    mask_ratio=0.6,
 )
 val_ds = validation_generator.genDS()
 val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
 
-model = model_builder(
+model = model_builder.build(
+    config=model_builder,
+    image_size=image_size,
     patch_size=patch_size,
     num_classes=num_classes,
-    drop_path_rate=dropout_rate,
     dtype=jnp.bfloat16,
+    **model_config,
 )
 # tab_img = jnp.ones([1, image_size, image_size, 3])
-# print(model.tabulate(jax.random.key(0), tab_img, train=False))
+# tab_mask = jnp.ones([1, mask_input_size, mask_input_size])
+# print(model.tabulate(jax.random.key(0), tab_img, tab_mask, train=False))
 
 num_steps_per_epoch = train_samples // global_batch_size
 learning_rate = optax.warmup_cosine_decay_schedule(
@@ -378,20 +384,14 @@ state = create_train_state(
     model,
     params_key,
     image_size,
-    num_classes,
+    mask_input_size,
+    0,
     learning_rate,
     weight_decay,
 )
 del params_key
 
-metrics_history = {
-    "train_loss": [],
-    "train_f1score": [],
-    "train_mcc": [],
-    "val_loss": [],
-    "val_f1score": [],
-    "val_mcc": [],
-}
+metrics_history = {"train_loss": [], "val_loss": []}
 ckpt = {"model": state, "metrics_history": metrics_history}
 
 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
@@ -407,9 +407,9 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
-if args.restore_params_ckpt is not None:
+if restore_params_ckpt:
     throwaway_manager = orbax.checkpoint.CheckpointManager(
-        args.restore_params_ckpt,
+        restore_params_ckpt,
         orbax_checkpointer,
     )
     latest_epoch = throwaway_manager.latest_step()
@@ -436,7 +436,7 @@ for step, batch in enumerate(train_ds):
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
 
-    if step % 192 == 0:
+    if step % 224 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
         pbar.set_postfix(loss=f"{merged_metrics.loss.compute():.04f}")
 
@@ -468,26 +468,18 @@ for step, batch in enumerate(train_ds):
 
         print(
             f"train epoch: {(step+1) // num_steps_per_epoch}, "
-            f"loss: {metrics_history['train_loss'][-1]:.04f}, "
-            f"f1score: {metrics_history['train_f1score'][-1]*100:.02f}, "
-            f"mcc: {metrics_history['train_mcc'][-1]*100:.02f}"
+            f"loss: {metrics_history['train_loss'][-1]:.04f}"
         )
         print(
             f"val epoch: {(step+1) // num_steps_per_epoch}, "
-            f"loss: {metrics_history['val_loss'][-1]:.04f}, "
-            f"f1score: {metrics_history['val_f1score'][-1]*100:.02f}, "
-            f"mcc: {metrics_history['val_mcc'][-1]*100:.02f}"
+            f"loss: {metrics_history['val_loss'][-1]:.04f}"
         )
 
         # Log Metrics to Weights & Biases
         wandb.log(
             {
                 "train_loss": metrics_history["train_loss"][-1],
-                "train_f1score": metrics_history["train_f1score"][-1] * 100,
-                "train_mcc": metrics_history["train_mcc"][-1] * 100,
                 "val_loss": metrics_history["val_loss"][-1],
-                "val_f1score": metrics_history["val_f1score"][-1] * 100,
-                "val_mcc": metrics_history["val_mcc"][-1] * 100,
             },
             step=(step + 1) // num_steps_per_epoch,
         )
