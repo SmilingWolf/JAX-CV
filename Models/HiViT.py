@@ -52,10 +52,7 @@ class RelativePositionBias(linen.Module):
             self.get_relative_position_index,
         ).value
 
-    def __call__(self, x, rpe_enabled):
-        if not rpe_enabled:
-            return x
-
+    def __call__(self, x):
         rpe_index = jnp.reshape(self.relative_position_index, (-1,))
         relative_position_bias = self.relative_position_bias_table[rpe_index]
 
@@ -83,10 +80,14 @@ class Attention(linen.Module):
     dtype: Any = jnp.float32
 
     def setup(self):
-        self.attention_bias = RelativePositionBias(
-            self.input_size,
-            self.num_heads,
-            dtype=self.dtype,
+        self.attention_bias = (
+            RelativePositionBias(
+                self.input_size,
+                self.num_heads,
+                dtype=self.dtype,
+            )
+            if self.rpe_enabled
+            else lambda x: x
         )
 
         self.qkv = linen.Dense(self.dim * 3, use_bias=self.qkv_bias, dtype=self.dtype)
@@ -106,7 +107,7 @@ class Attention(linen.Module):
         q = q / jnp.sqrt(q.shape[-1]).astype(q.dtype)
         attn = q @ jnp.transpose(k, (0, 1, 3, 2))
 
-        attn = self.attention_bias(attn, self.rpe_enabled)
+        attn = self.attention_bias(attn)
 
         attn = self.softmax(attn).astype(self.dtype)
         attn = self.attn_drop(attn, deterministic=not train)
@@ -127,6 +128,7 @@ class PatchMerging(linen.Module):
     """
     input_resolution: Tuple[int]
     norm_layer: Callable = linen.LayerNorm
+
     dtype: Any = jnp.float32
 
     @linen.compact
