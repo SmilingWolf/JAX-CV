@@ -245,7 +245,7 @@ class HierarchicalViTBlock(linen.Module):
                 dim=C,
                 num_heads=self.num_heads,
                 dtype=self.dtype,
-            )(x)
+            )(x, train=train)
         else:
             x = MLP(hidden_features=self.mlp_dim, dtype=self.dtype)(x, train=train)
 
