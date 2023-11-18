@@ -295,7 +295,7 @@ class BasicLayer(linen.Module):
                 drop_path_ratio=self.drop_path_ratio[i],
                 norm_layer=self.norm_layer,
                 dtype=self.dtype,
-            )(x)
+            )(x, train=train)
 
         # patch merging layer
         if self.downsample is not None:
