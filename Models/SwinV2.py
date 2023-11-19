@@ -307,7 +307,7 @@ class SwinTransformerBlock(linen.Module):
     dtype: Any = jnp.float32
 
     def setup(self):
-        self.norm1 = self.norm_layer()
+        self.norm1 = self.norm_layer(scale_init=linen.zeros)
         self.attn = WindowAttention(
             self.dim,
             window_size=(self.window_size, self.window_size),
@@ -323,7 +323,7 @@ class SwinTransformerBlock(linen.Module):
         )
 
         self.drop_path = linen.Dropout(rate=self.drop_path_ratio, broadcast_dims=(1, 2))
-        self.norm2 = self.norm_layer()
+        self.norm2 = self.norm_layer(scale_init=linen.zeros)
         mlp_hidden_dim = int(self.dim * self.mlp_ratio)
         self.mlp = MLP(
             hidden_features=mlp_hidden_dim,
