@@ -53,13 +53,9 @@ def create_train_state(
     loss = metrics.Average.from_output("loss")
     collection = Metrics.create(loss=loss)
 
-    def should_decay(path, _):
-        is_kernel = path[-1].key == "kernel"
-        is_cpb = "attention_bias" in [x.key for x in path]
-        return is_kernel and not is_cpb
-
-    wd_mask = jax.tree_util.tree_map_with_path(should_decay, params)
+    wd_mask = jax.tree_util.tree_map_with_path(module.should_decay, params)
     tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
+    tx = optax.chain(optax.clip_by_global_norm(5.0), tx)
     return TrainState.create(
         apply_fn=module.apply,
         params=params,

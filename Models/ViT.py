@@ -196,6 +196,11 @@ class VisionTransformer(linen.Module):
         action = r"model/params/encoder/\1"
         return [(regex, action)]
 
+    def should_decay(self, path, _):
+        is_kernel = path[-1].key == "kernel"
+        verdict = is_kernel
+        return verdict
+
 
 def vit_small():
     config = {

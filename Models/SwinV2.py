@@ -706,6 +706,13 @@ class SwinTransformerV2(linen.Module):
         action = r"model/params/encoder/\1"
         return [(regex, action)]
 
+    def should_decay(self, path, _):
+        is_kernel = path[-1].key == "kernel"
+        is_cpb = "attention_bias" in [x.key for x in path]
+        is_scale = path[-1].key == "scale"
+        verdict = (is_kernel and not is_cpb) or is_scale
+        return verdict
+
 
 def swinv2_tiny():
     config = {

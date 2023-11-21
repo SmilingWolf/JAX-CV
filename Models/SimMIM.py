@@ -236,6 +236,14 @@ class SimMIM(linen.Module):
         )
         return parser
 
+    def should_decay(self, path, _):
+        if path[0].key == "encoder":
+            return self.encoder.should_decay(path, _)
+
+        is_kernel = path[-1].key == "kernel"
+        verdict = is_kernel
+        return verdict
+
 
 def simmim_swinv2_tiny():
     config = {

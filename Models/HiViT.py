@@ -404,6 +404,11 @@ class HierarchicalViT(linen.Module):
         action = r"model/params/encoder/\2"
         return [(regex, action)]
 
+    def should_decay(self, path, _):
+        is_kernel = path[-1].key == "kernel"
+        verdict = is_kernel
+        return verdict
+
 
 def hivit_tiny():
     config = {
