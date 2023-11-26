@@ -173,6 +173,12 @@ parser.add_argument(
     type=str,
 )
 parser.add_argument(
+    "--wandb-run-id",
+    default=None,
+    help="WandB run ID (8 chars code) to resume interrupted run",
+    type=str,
+)
+parser.add_argument(
     "--wandb-tags",
     nargs="*",
     help="Space separated list of tags for WandB",
@@ -363,13 +369,26 @@ del model_config["epochs"]
 train_config.update(model_config)
 
 # WandB tracking
-wandb.init(
-    project="tpu-tracking",
+wandb_args = dict(
     entity="smilingwolf",
+    project="tpu-tracking",
     config=train_config,
     name=run_name,
     tags=args.wandb_tags,
 )
+
+if args.wandb_run_id:
+    wandb_args["id"] = args.wandb_run_id
+    wandb_args["resume"] = "must"
+
+    wandb_entity = wandb_args["entity"]
+    wandb_project = wandb_args["project"]
+    wandb_run_id = wandb_args["id"]
+    wandb_run_path = f"{wandb_entity}/{wandb_project}/{wandb_run_id}"
+    run_name = wandb.Api().run(wandb_run_path).name
+    wandb_args["name"] = run_name
+
+wandb.init(**wandb_args)
 
 tf.random.set_seed(0)
 root_key = jax.random.key(0)
@@ -487,18 +506,19 @@ if restore_params_ckpt or restore_simmim_ckpt:
 latest_epoch = checkpoint_manager.latest_step()
 if latest_epoch is not None:
     restored = checkpoint_manager.restore(latest_epoch, items=ckpt)
-    state = state.replace(params=restored["model"].params)
+    state = restored["model"]
     metrics_history = restored["metrics_history"]
 else:
     latest_epoch = 0
 
+step = int(state.step)
 state = jax_utils.replicate(state)
 p_train_step = jax.pmap(train_step, axis_name="batch")
 p_eval_step = jax.pmap(eval_step, axis_name="batch")
 
-epochs = 0
+epochs = step // num_steps_per_epoch
 pbar = tqdm(total=num_steps_per_epoch)
-for step, batch in enumerate(train_ds):
+for batch in train_ds:
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
     state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
@@ -563,7 +583,7 @@ for step, batch in enumerate(train_ds):
         ckpt["metrics_history"] = metrics_history
         save_args = orbax_utils.save_args_from_target(ckpt)
         checkpoint_manager.save(
-            epochs + latest_epoch,
+            epochs,
             ckpt,
             save_kwargs={"save_args": save_args},
             metrics={"val_loss": float(metrics_history["val_loss"][-1])},
@@ -574,5 +594,6 @@ for step, batch in enumerate(train_ds):
             break
 
         pbar.reset()
+    step += 1
 
 pbar.close()
