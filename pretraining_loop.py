@@ -123,6 +123,12 @@ parser.add_argument(
     type=str,
 )
 parser.add_argument(
+    "--wandb-project",
+    default="tpu-tracking",
+    help="WandB project",
+    type=str,
+)
+parser.add_argument(
     "--wandb-run-id",
     default=None,
     help="WandB run ID (8 chars code) to resume interrupted run",
@@ -312,7 +318,7 @@ train_config.update(model_config)
 # WandB tracking
 wandb_args = dict(
     entity="smilingwolf",
-    project="tpu-tracking",
+    project=args.wandb_project,
     config=train_config,
     name=run_name,
     tags=args.wandb_tags,
