@@ -194,6 +194,12 @@ parser.add_argument(
     type=int,
 )
 parser.add_argument(
+    "--mask-patch-size",
+    default=32,
+    help="Size of the mask patches for SimMIM",
+    type=int,
+)
+parser.add_argument(
     "--learning-rate",
     default=0.001,
     help="Max learning rate",
@@ -274,7 +280,7 @@ rotation_ratio = args.rotation_ratio
 cutout_max_pct = args.cutout_max_pct
 cutout_patches = args.cutout_patches
 random_resize_method = True
-mask_patch_size = 32
+mask_patch_size = args.mask_patch_size
 model_patch_size = patch_size
 mask_input_size = image_size // model_patch_size
 
