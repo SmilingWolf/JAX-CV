@@ -198,7 +198,8 @@ class VisionTransformer(linen.Module):
 
     def should_decay(self, path, _):
         is_kernel = path[-1].key == "kernel"
-        verdict = is_kernel
+        is_scale = path[-1].key == "scale"
+        verdict = is_kernel or is_scale
         return verdict
 
 
