@@ -361,7 +361,7 @@ class HierarchicalViT(linen.Module):
             vit_body.append(layer)
         self.vit_body = vit_body
 
-        self.norm = norm_layer() if self.num_classes > 0 else lambda x: x
+        self.norm = norm_layer()
         self.head = (
             linen.Dense(self.num_classes, dtype=self.dtype)
             if self.num_classes > 0
@@ -399,14 +399,14 @@ class HierarchicalViT(linen.Module):
     def get_simmim_orbax_txs():
         # SimMIM checkpoint have no head params - don't try to restore them.
         # All the other params we care about are under the "encoder" subsection
-        # Moreover, HiViT uses post-GAP norm, so we can't use the weights from pretraining
-        regex = r"(?!model/params/(head|norm))model/params/(.*)"
-        action = r"model/params/encoder/\2"
+        regex = r"(?!model/params/head)model/params/(.*)"
+        action = r"model/params/encoder/\1"
         return [(regex, action)]
 
     def should_decay(self, path, _):
         is_kernel = path[-1].key == "kernel"
-        verdict = is_kernel
+        is_scale = path[-1].key == "scale"
+        verdict = is_kernel or is_scale
         return verdict
 
 

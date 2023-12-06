@@ -163,6 +163,8 @@ class HierarchicalViTForSimMIM(HierarchicalViT):
         for layer in self.vit_body:
             x = layer(x, train=train)
 
+        x = self.norm(x)
+
         B, L, C = x.shape
         H = W = int(L**0.5)
         x = jnp.reshape(x, (B, H, W, C))
