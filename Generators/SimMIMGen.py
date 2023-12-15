@@ -25,6 +25,7 @@ class DataGenerator:
         mask_patch_size=32,
         model_patch_size=4,
         mask_ratio=0.6,
+        repeat=True,
     ):
         """
         Noise level 1: augmentations I will never train without
@@ -51,6 +52,8 @@ class DataGenerator:
         self.mask_patch_size = mask_patch_size
         self.model_patch_size = model_patch_size
         self.mask_ratio = mask_ratio
+
+        self.repeat = repeat
 
     def gen_mask(self, image, labels):
         rand_size = self.image_size // self.mask_patch_size
@@ -296,7 +299,9 @@ class DataGenerator:
     def genDS(self):
         files = tf.data.Dataset.list_files(self.records_path)
         files = files.cache()
-        files = files.repeat()
+
+        if self.repeat:
+            files = files.repeat()
 
         dataset = files.interleave(
             tf.data.TFRecordDataset,
