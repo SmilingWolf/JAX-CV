@@ -608,7 +608,6 @@ class SwinTransformerV2(linen.Module):
     def setup(self):
         depths = self.depths
         num_layers = len(depths)
-        num_features = int(self.embed_dim * 2 ** (num_layers - 1))
         norm_layer = partial(
             self.norm_layer,
             epsilon=self.layer_norm_eps,

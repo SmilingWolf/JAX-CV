@@ -1,5 +1,4 @@
 import dataclasses
-from functools import partial
 from typing import Any, Tuple
 
 import einops
