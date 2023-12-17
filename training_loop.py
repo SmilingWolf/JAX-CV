@@ -490,7 +490,7 @@ if args.checkpoints_keep == -1:
 
 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 options = orbax.checkpoint.CheckpointManagerOptions(
-    options_dict,
+    **options_dict,
     create=True,
 )
 checkpoint_manager = orbax.checkpoint.CheckpointManager(
