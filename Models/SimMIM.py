@@ -278,6 +278,22 @@ def simmim_swinv2_base():
     return SimMIM(**config)
 
 
+def simmim_swinv2_large():
+    config = {
+        "embed_dim": 192,
+        "depths": (2, 2, 18, 2),
+        "num_heads": (6, 12, 24, 48),
+    }
+    encoder = SwinTransformerV2ForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
 def simmim_vit_small():
     config = {
         "num_layers": 12,
