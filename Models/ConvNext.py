@@ -29,6 +29,7 @@ class ConvNextBlock(linen.Module):
     drop_path_ratio: float
 
     bottleneck_ratio: float = 4.0
+    layer_scale_init_value: float = 1e-6
 
     norm_layer: Callable = linen.LayerNorm
 
@@ -38,19 +39,35 @@ class ConvNextBlock(linen.Module):
     def __call__(self, x, train: bool = False):
         _, _, _, C = x.shape
         hidden_size = int(C * self.bottleneck_ratio)
+        kernel_init = linen.initializers.truncated_normal(0.2)
 
         shortcut = x
         x = linen.Conv(
             features=C,
             kernel_size=(7, 7),
             feature_group_count=C,
+            kernel_init=kernel_init,
             dtype=self.dtype,
         )(x)
         x = self.norm_layer()(x)
-        x = linen.Conv(features=hidden_size, kernel_size=(1, 1), dtype=self.dtype)(x)
+        x = linen.Conv(
+            features=hidden_size,
+            kernel_size=(1, 1),
+            kernel_init=kernel_init,
+            dtype=self.dtype,
+        )(x)
         x = linen.gelu(x)
-        x = linen.Conv(features=C, kernel_size=(1, 1), dtype=self.dtype)(x)
-        x = LayerScale(dim=C, dtype=self.dtype)(x)
+        x = linen.Conv(
+            features=C,
+            kernel_size=(1, 1),
+            kernel_init=kernel_init,
+            dtype=self.dtype,
+        )(x)
+        x = LayerScale(
+            dim=C,
+            layer_scale_init_value=self.layer_scale_init_value,
+            dtype=self.dtype,
+        )(x)
         x = linen.Dropout(
             rate=self.drop_path_ratio,
             broadcast_dims=(1, 2, 3),
@@ -67,6 +84,7 @@ class BasicLayer(linen.Module):
 
     downsample: bool = True
     bottleneck_ratio: float = 4.0
+    layer_scale_init_value: float = 1e-6
 
     norm_layer: Callable = linen.LayerNorm
 
@@ -75,11 +93,14 @@ class BasicLayer(linen.Module):
     @linen.compact
     def __call__(self, x, train: bool = False):
         if self.downsample:
+            kernel_init = linen.initializers.truncated_normal(0.2)
+
             x = self.norm_layer()(x)
             x = linen.Conv(
                 features=self.embed_dim,
                 kernel_size=(2, 2),
                 strides=(2, 2),
+                kernel_init=kernel_init,
                 dtype=self.dtype,
             )(x)
 
@@ -87,6 +108,7 @@ class BasicLayer(linen.Module):
             x = ConvNextBlock(
                 drop_path_ratio=self.drop_path_ratio[i],
                 bottleneck_ratio=self.bottleneck_ratio,
+                layer_scale_init_value=self.layer_scale_init_value,
                 norm_layer=self.norm_layer,
                 dtype=self.dtype,
             )(x, train=train)
@@ -111,14 +133,27 @@ class PatchEmbed(linen.Module):
         B, _, _, _ = x.shape
         patch_size = (self.patch_size, self.patch_size)
 
+        kernel_init = linen.initializers.truncated_normal(0.2)
         x = linen.Conv(
             self.embed_dim,
             kernel_size=patch_size,
             strides=patch_size,
+            kernel_init=kernel_init,
             dtype=self.dtype,
         )(x)
         x = self.norm_layer()(x)
         return x
+
+
+# Cfr. arXiv:2103.17239. Found this to work better
+# than the paper default (1e-6) especially for the tiny variant.
+def cait_layer_scale_eps(depth):
+    if depth <= 18:
+        return 0.1
+    elif depth <= 24:
+        return 1e-4
+    else:
+        return 1e-5
 
 
 class ConvNext(linen.Module):
@@ -145,6 +180,8 @@ class ConvNext(linen.Module):
             dtype=self.dtype,
         )
 
+        layer_scale_init_value = cait_layer_scale_eps(sum(depths))
+
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
             patch_size=self.patch_size,
@@ -163,8 +200,9 @@ class ConvNext(linen.Module):
                 depth=depths[i_layer],
                 embed_dim=self.embed_dims[i_layer],
                 drop_path_ratio=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
-                norm_layer=norm_layer,
                 downsample=i_layer > 0,
+                layer_scale_init_value=layer_scale_init_value,
+                norm_layer=norm_layer,
                 dtype=self.dtype,
             )
             convnext_body.append(layer)
