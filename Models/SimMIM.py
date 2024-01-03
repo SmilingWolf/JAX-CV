@@ -5,6 +5,7 @@ import einops
 import jax.numpy as jnp
 from flax import linen
 
+from .ConvNext import ConvNext
 from .HiViT import HierarchicalViT
 from .SwinV2 import SwinTransformerV2
 from .ViT import VisionTransformer
@@ -171,6 +172,31 @@ class HierarchicalViTForSimMIM(HierarchicalViT):
 
     def get_stride(self):
         return 16
+
+
+class ConvNextForSimMIM(ConvNext):
+    def setup(self):
+        super().setup()
+
+        token_init = linen.initializers.normal(0.02)
+        self.mask_token = self.param("mask_token", token_init, (self.embed_dims[0],))
+
+    def __call__(self, x, mask, train: bool = False):
+        x = self.patch_embed(x)
+
+        B, H, W, _ = x.shape
+        mask_tokens = jnp.broadcast_to(self.mask_token, (B, H, W, self.embed_dims[0]))
+        mask = jnp.reshape(mask, (B, H, W, 1)).astype(mask_tokens.dtype)
+        x = x * (1.0 - mask) + mask_tokens * mask
+
+        for layer in self.convnext_body:
+            x = layer(x, train=train)
+
+        x = self.norm(x)
+        return x
+
+    def get_stride(self):
+        return 32
 
 
 class SimMIM(linen.Module):
@@ -353,6 +379,51 @@ def simmim_hivit_small(**kwargs):
         "num_heads": (None, None, 6),
     }
     encoder = HierarchicalViTForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_convnext_tiny(**kwargs):
+    config = {
+        "embed_dims": (96, 192, 384, 768),
+        "depths": (3, 3, 9, 3),
+    }
+    encoder = ConvNextForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_convnext_small(**kwargs):
+    config = {
+        "embed_dims": (96, 192, 384, 768),
+        "depths": (3, 3, 27, 3),
+    }
+    encoder = ConvNextForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_convnext_base(**kwargs):
+    config = {
+        "embed_dims": (128, 256, 512, 1024),
+        "depths": (3, 3, 27, 3),
+    }
+    encoder = ConvNextForSimMIM(**config)
 
     config = {
         "encoder": encoder,

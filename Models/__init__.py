@@ -1,6 +1,9 @@
 from .ConvNext import convnext_base, convnext_small, convnext_tiny
 from .HiViT import hivit_base, hivit_small, hivit_tiny
 from .SimMIM import (
+    simmim_convnext_base,
+    simmim_convnext_small,
+    simmim_convnext_tiny,
     simmim_hivit_small,
     simmim_hivit_tiny,
     simmim_swinv2_base,
@@ -31,4 +34,7 @@ model_registry = {
     "simmim_vit_base": simmim_vit_base,
     "simmim_hivit_tiny": simmim_hivit_tiny,
     "simmim_hivit_small": simmim_hivit_small,
+    "simmim_convnext_tiny": simmim_convnext_tiny,
+    "simmim_convnext_small": simmim_convnext_small,
+    "simmim_convnext_base": simmim_convnext_base,
 }
