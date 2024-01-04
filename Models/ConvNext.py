@@ -39,7 +39,7 @@ class ConvNextBlock(linen.Module):
     def __call__(self, x, train: bool = False):
         _, _, _, C = x.shape
         hidden_size = int(C * self.bottleneck_ratio)
-        kernel_init = linen.initializers.truncated_normal(0.2)
+        kernel_init = linen.initializers.truncated_normal(0.02)
 
         shortcut = x
         x = linen.Conv(
@@ -93,7 +93,7 @@ class BasicLayer(linen.Module):
     @linen.compact
     def __call__(self, x, train: bool = False):
         if self.downsample:
-            kernel_init = linen.initializers.truncated_normal(0.2)
+            kernel_init = linen.initializers.truncated_normal(0.02)
 
             x = self.norm_layer()(x)
             x = linen.Conv(
@@ -133,7 +133,7 @@ class PatchEmbed(linen.Module):
         B, _, _, _ = x.shape
         patch_size = (self.patch_size, self.patch_size)
 
-        kernel_init = linen.initializers.truncated_normal(0.2)
+        kernel_init = linen.initializers.truncated_normal(0.02)
         x = linen.Conv(
             self.embed_dim,
             kernel_size=patch_size,
