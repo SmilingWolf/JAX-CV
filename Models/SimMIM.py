@@ -354,6 +354,23 @@ def simmim_vit_base():
     return SimMIM(**config)
 
 
+def simmim_vit_large():
+    config = {
+        "num_layers": 24,
+        "embed_dim": 1024,
+        "mlp_dim": 4096,
+        "num_heads": 16,
+    }
+    encoder = VisionTransformerForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.patch_size,
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
 def simmim_hivit_tiny():
     config = {
         "depths": (1, 1, 10),

@@ -10,6 +10,7 @@ from .SimMIM import (
     simmim_swinv2_large,
     simmim_swinv2_tiny,
     simmim_vit_base,
+    simmim_vit_large,
     simmim_vit_small,
 )
 from .SwinV2 import swinv2_base, swinv2_large, swinv2_tiny
@@ -32,6 +33,7 @@ model_registry = {
     "simmim_swinv2_large": simmim_swinv2_large,
     "simmim_vit_small": simmim_vit_small,
     "simmim_vit_base": simmim_vit_base,
+    "simmim_vit_large": simmim_vit_large,
     "simmim_hivit_tiny": simmim_hivit_tiny,
     "simmim_hivit_small": simmim_hivit_small,
     "simmim_convnext_tiny": simmim_convnext_tiny,
