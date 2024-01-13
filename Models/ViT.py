@@ -7,6 +7,43 @@ import numpy as np
 from flax import linen
 
 
+class Attention(linen.Module):
+    dim: int
+    num_heads: int
+    qkv_bias: bool = True
+    attn_drop_ratio: float = 0.0
+    proj_drop_ratio: float = 0.0
+
+    dtype: Any = jnp.float32
+
+    def setup(self):
+        self.qkv = linen.Dense(self.dim * 3, use_bias=self.qkv_bias, dtype=self.dtype)
+        self.attn_drop = linen.Dropout(self.attn_drop_ratio)
+        self.proj = linen.Dense(self.dim, dtype=self.dtype)
+        self.proj_drop = linen.Dropout(self.proj_drop_ratio)
+        self.softmax = partial(linen.activation.softmax, axis=-1)
+
+    def __call__(self, x, train: bool = False):
+        B, N, C = x.shape
+        qkv = self.qkv(x)
+        qkv = jnp.reshape(qkv, (B, N, 3, self.num_heads, C // self.num_heads))
+        qkv = jnp.transpose(qkv, (2, 0, 3, 1, 4))
+
+        q, k, v = (qkv[0], qkv[1], qkv[2])
+
+        q = q / jnp.sqrt(q.shape[-1]).astype(q.dtype)
+        attn = q @ jnp.transpose(k, (0, 1, 3, 2))
+
+        attn = self.softmax(attn.astype(jnp.float32)).astype(self.dtype)
+        attn = self.attn_drop(attn, deterministic=not train)
+
+        x = jnp.transpose(attn @ v, (0, 2, 1, 3))
+        x = jnp.reshape((x), (B, N, C))
+        x = self.proj(x)
+        x = self.proj_drop(x, deterministic=not train)
+        return x
+
+
 class MLP(linen.Module):
     hidden_features: int
     act_layer: Callable = linen.gelu
@@ -84,10 +121,11 @@ class VisionTransformerBlock(linen.Module):
         shortcut = x
 
         x = self.norm_layer()(x)
-        x = linen.MultiHeadDotProductAttention(
+        x = Attention(
+            dim=x.shape[-1],
             num_heads=self.num_heads,
             dtype=self.dtype,
-        )(x, x)
+        )(x, train=train)
         x = linen.Dropout(
             rate=self.drop_path_ratio,
             broadcast_dims=(1, 2),
