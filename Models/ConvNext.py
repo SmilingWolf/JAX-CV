@@ -30,6 +30,7 @@ class ConvNextBlock(linen.Module):
 
     bottleneck_ratio: float = 4.0
     layer_scale_init_value: float = 1e-6
+    use_conv_bias: bool = True
 
     norm_layer: Callable = linen.LayerNorm
 
@@ -47,6 +48,7 @@ class ConvNextBlock(linen.Module):
             kernel_size=(7, 7),
             feature_group_count=C,
             kernel_init=kernel_init,
+            use_bias=self.use_conv_bias,
             dtype=self.dtype,
         )(x)
         x = self.norm_layer()(x)
@@ -54,6 +56,7 @@ class ConvNextBlock(linen.Module):
             features=hidden_size,
             kernel_size=(1, 1),
             kernel_init=kernel_init,
+            use_bias=self.use_conv_bias,
             dtype=self.dtype,
         )(x)
         x = linen.gelu(x)
@@ -61,6 +64,7 @@ class ConvNextBlock(linen.Module):
             features=C,
             kernel_size=(1, 1),
             kernel_init=kernel_init,
+            use_bias=self.use_conv_bias,
             dtype=self.dtype,
         )(x)
         x = LayerScale(
@@ -85,6 +89,7 @@ class BasicLayer(linen.Module):
     downsample: bool = True
     bottleneck_ratio: float = 4.0
     layer_scale_init_value: float = 1e-6
+    use_conv_bias: bool = True
 
     norm_layer: Callable = linen.LayerNorm
 
@@ -101,6 +106,7 @@ class BasicLayer(linen.Module):
                 kernel_size=(2, 2),
                 strides=(2, 2),
                 kernel_init=kernel_init,
+                use_bias=self.use_conv_bias,
                 dtype=self.dtype,
             )(x)
 
@@ -109,6 +115,7 @@ class BasicLayer(linen.Module):
                 drop_path_ratio=self.drop_path_ratio[i],
                 bottleneck_ratio=self.bottleneck_ratio,
                 layer_scale_init_value=self.layer_scale_init_value,
+                use_conv_bias=self.use_conv_bias,
                 norm_layer=self.norm_layer,
                 dtype=self.dtype,
             )(x, train=train)
@@ -125,6 +132,7 @@ class PatchEmbed(linen.Module):
     """
     patch_size: int = 4
     embed_dim: int = 96
+    use_conv_bias: bool = True
     norm_layer: Callable = linen.LayerNorm
     dtype: Any = jnp.float32
 
@@ -139,6 +147,7 @@ class PatchEmbed(linen.Module):
             kernel_size=patch_size,
             strides=patch_size,
             kernel_init=kernel_init,
+            use_bias=self.use_conv_bias,
             dtype=self.dtype,
         )(x)
         x = self.norm_layer()(x)
@@ -166,6 +175,9 @@ class ConvNext(linen.Module):
 
     drop_path_rate: float = 0.1
 
+    use_norm_bias: bool = False
+    use_conv_bias: bool = False
+
     norm_layer: Callable = linen.LayerNorm
 
     layer_norm_eps: float = 1e-6
@@ -176,6 +188,7 @@ class ConvNext(linen.Module):
         num_layers = len(depths)
         norm_layer = partial(
             self.norm_layer,
+            use_bias=self.use_norm_bias,
             epsilon=self.layer_norm_eps,
             dtype=self.dtype,
         )
@@ -186,6 +199,7 @@ class ConvNext(linen.Module):
         self.patch_embed = PatchEmbed(
             patch_size=self.patch_size,
             embed_dim=self.embed_dims[0],
+            use_conv_bias=self.use_conv_bias,
             norm_layer=norm_layer,
             dtype=self.dtype,
         )
@@ -202,6 +216,7 @@ class ConvNext(linen.Module):
                 drop_path_ratio=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
                 downsample=i_layer > 0,
                 layer_scale_init_value=layer_scale_init_value,
+                use_conv_bias=self.use_conv_bias,
                 norm_layer=norm_layer,
                 dtype=self.dtype,
             )
@@ -241,6 +256,34 @@ class ConvNext(linen.Module):
             help="Stochastic depth rate",
             type=float,
         )
+
+        parser.add_argument(
+            "--enable-conv-bias",
+            dest="use_conv_bias",
+            help="Enable conv layers bias",
+            action="store_true",
+        )
+        parser.add_argument(
+            "--disable-conv-bias",
+            dest="use_conv_bias",
+            help="Disable conv layers bias",
+            action="store_false",
+        )
+        parser.set_defaults(use_conv_bias=self.use_conv_bias)
+
+        parser.add_argument(
+            "--enable-norm-bias",
+            dest="use_norm_bias",
+            help="Enable norm layers bias",
+            action="store_true",
+        )
+        parser.add_argument(
+            "--disable-norm-bias",
+            dest="use_norm_bias",
+            help="Disable norm layers bias",
+            action="store_false",
+        )
+        parser.set_defaults(use_norm_bias=self.use_norm_bias)
         return parser
 
     @staticmethod

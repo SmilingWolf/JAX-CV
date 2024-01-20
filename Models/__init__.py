@@ -14,7 +14,7 @@ from .SimMIM import (
     simmim_vit_small,
 )
 from .SwinV2 import swinv2_base, swinv2_large, swinv2_tiny
-from .ViT import vit_base, vit_small
+from .ViT import vit_base, vit_large, vit_small
 
 model_registry = {
     "swinv2_tiny": swinv2_tiny,
@@ -25,6 +25,7 @@ model_registry = {
     "hivit_base": hivit_base,
     "vit_small": vit_small,
     "vit_base": vit_base,
+    "vit_large": vit_large,
     "convnext_tiny": convnext_tiny,
     "convnext_small": convnext_small,
     "convnext_base": convnext_base,
