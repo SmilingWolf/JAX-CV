@@ -175,8 +175,8 @@ class ConvNext(linen.Module):
 
     drop_path_rate: float = 0.1
 
-    use_norm_bias: bool = False
-    use_conv_bias: bool = False
+    use_norm_bias: bool = True
+    use_conv_bias: bool = True
 
     norm_layer: Callable = linen.LayerNorm
 
