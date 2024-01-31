@@ -512,7 +512,7 @@ for batch in train_ds:
             step=(step + 1) // num_steps_per_epoch,
         )
 
-        ckpt["model"] = val_state
+        ckpt["model"] = jax.device_get(val_state)
         ckpt["metrics_history"] = metrics_history
         save_args = orbax_utils.save_args_from_target(ckpt)
         checkpoint_manager.save(
