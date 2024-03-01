@@ -297,9 +297,7 @@ class ConvNext(linen.Module):
 
     def should_decay(self, path, _):
         is_kernel = path[-1].key == "kernel"
-        is_scale = path[-1].key == "scale"
-        is_gamma = path[-1].key == "gamma"
-        verdict = is_kernel or is_scale or is_gamma
+        verdict = is_kernel
         return verdict
 
 

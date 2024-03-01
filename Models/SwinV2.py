@@ -710,8 +710,7 @@ class SwinTransformerV2(linen.Module):
 
     def should_decay(self, path, _):
         is_kernel = path[-1].key == "kernel"
-        is_scale = path[-1].key == "scale"
-        verdict = is_kernel or is_scale
+        verdict = is_kernel
         return verdict
 
 
