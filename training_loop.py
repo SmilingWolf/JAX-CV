@@ -36,6 +36,7 @@ def create_optimizer_tx(
     module,
     params,
     learning_rate: Union[float, Callable],
+    grad_clip: float,
     weight_decay: float,
     freeze_model_body: bool,
 ):
@@ -44,7 +45,7 @@ def create_optimizer_tx(
 
     wd_mask = jax.tree_util.tree_map_with_path(module.should_decay, params)
     tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
-    tx = optax.chain(optax.clip_by_global_norm(5.0), tx)
+    tx = optax.chain(optax.clip_by_global_norm(grad_clip), tx)
 
     if freeze_model_body:
         partition_optimizers = {"trainable": tx, "frozen": optax.set_to_zero()}
@@ -59,6 +60,7 @@ def create_train_state(
     target_size: int,
     num_classes: int,
     learning_rate: Union[float, Callable],
+    grad_clip: float,
     weight_decay: float,
     freeze_model_body: bool = False,
 ):
@@ -92,6 +94,7 @@ def create_train_state(
         module,
         params,
         learning_rate,
+        grad_clip,
         weight_decay,
         freeze_model_body,
     )
@@ -267,6 +270,12 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
+    "--grad-clip",
+    default=1.0,
+    help="Gradient clipping",
+    type=float,
+)
+parser.add_argument(
     "--weight-decay",
     default=0.0001,
     help="Weight decay",
@@ -333,6 +342,7 @@ val_samples = dataset_specs["val_samples"]
 # Model hyperparams
 patch_size = args.patch_size
 learning_rate = args.learning_rate
+grad_clip = args.grad_clip
 weight_decay = args.weight_decay
 freeze_model_body = args.freeze_model_body
 
@@ -361,6 +371,7 @@ train_config["train_samples"] = train_samples
 train_config["val_samples"] = val_samples
 train_config["patch_size"] = patch_size
 train_config["learning_rate"] = learning_rate
+train_config["grad_clip"] = grad_clip
 train_config["weight_decay"] = weight_decay
 train_config["noise_level"] = noise_level
 train_config["mixup_alpha"] = mixup_alpha
@@ -465,6 +476,7 @@ state = create_train_state(
     image_size,
     num_classes,
     learning_rate,
+    grad_clip,
     weight_decay,
     freeze_model_body,
 )
