@@ -220,6 +220,22 @@ parser.add_argument(
     help="Freeze the feature extraction layers, train classifier head only",
 )
 parser.add_argument(
+    "--reset-head",
+    action="store_true",
+    help="Reinit the head weights when loading a pretrained model",
+)
+parser.add_argument(
+    "--clip-pretrained-weights",
+    action="store_true",
+    help="Clip the pretrained weights around the mean",
+)
+parser.add_argument(
+    "--clip-stddev",
+    default=2.0,
+    help="Clip the values of pretrained weights to within x standard deviations from the mean",
+    type=float,
+)
+parser.add_argument(
     "--dataset-file",
     default="datasets/aibooru.json",
     help="JSON file with dataset specs",
@@ -369,6 +385,9 @@ grad_clip = args.grad_clip
 weight_decay = args.weight_decay
 loss_weights_file = args.loss_weights_file
 freeze_model_body = args.freeze_model_body
+reset_head = args.reset_head
+clip_pretrained_weights = args.clip_pretrained_weights
+clip_stddev = args.clip_stddev
 
 # Augmentations hyperparams
 noise_level = 2
@@ -408,6 +427,9 @@ train_config["random_resize_method"] = random_resize_method
 train_config["restore_params_ckpt"] = restore_params_ckpt
 train_config["restore_simmim_ckpt"] = restore_simmim_ckpt
 train_config["freeze_model_body"] = freeze_model_body
+train_config["reset_head"] = reset_head
+train_config["clip_pretrained_weights"] = clip_pretrained_weights
+train_config["clip_stddev"] = clip_stddev
 
 # Add model specific arguments to WandB dict
 args_dict = vars(args)
@@ -538,6 +560,17 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     options,
 )
 
+
+def clipper(param, max_stddev=clip_stddev):
+    new_val = param
+    new_val_stddev = new_val.std()
+    new_val_mean = new_val.mean()
+    max_val = new_val_mean + new_val_stddev * max_stddev
+    min_val = new_val_mean - new_val_stddev * max_stddev
+    new_val = jnp.clip(new_val, min_val, max_val)
+    return new_val
+
+
 if restore_params_ckpt or restore_simmim_ckpt:
     ckpt_path = restore_params_ckpt if restore_params_ckpt else restore_simmim_ckpt
 
@@ -547,6 +580,15 @@ if restore_params_ckpt or restore_simmim_ckpt:
     )
     latest_epoch = throwaway_manager.latest_step()
     restored = throwaway_manager.restore(latest_epoch)
+
+    if restore_params_ckpt and reset_head:
+        del restored["model"]["params"]["head"]
+
+    if clip_pretrained_weights:
+        restored["model"]["params"] = jax.tree_util.tree_map(
+            clipper,
+            restored["model"]["params"],
+        )
 
     transforms = {}
     if restore_simmim_ckpt:
