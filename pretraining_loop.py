@@ -522,6 +522,8 @@ for batch in train_ds:
             metrics={"val_loss": float(metrics_history["val_loss"][-1])},
         )
 
+        del val_state
+
         epochs += 1
         if epochs == num_epochs:
             break
