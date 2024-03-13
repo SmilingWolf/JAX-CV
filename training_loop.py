@@ -6,6 +6,7 @@ from typing import Any, Callable, Union
 import flax
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import orbax.checkpoint
 import tensorflow as tf
@@ -116,11 +117,11 @@ def create_train_state(
     )
 
 
-def train_step(state, batch, dropout_key):
+def train_step(state, batch, weights, dropout_key):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
-    def loss_fn(params, **kwargs):
+    def loss_fn(params, weights, **kwargs):
         logits = state.apply_fn(
             {"params": params, **kwargs},
             batch["images"],
@@ -128,11 +129,12 @@ def train_step(state, batch, dropout_key):
             rngs={"dropout": dropout_train_key},
         )
         loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
+        loss = loss * weights
         loss = loss.sum() / batch["labels"].shape[0]
         return loss, logits
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, logits), grads = grad_fn(state.params, **state.constants)
+    (loss, logits), grads = grad_fn(state.params, weights, **state.constants)
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
@@ -296,6 +298,12 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
+    "--loss-weights-file",
+    default=None,
+    help="Numpy dump of weights to apply to the training loss",
+    type=str,
+)
+parser.add_argument(
     "--mixup-alpha",
     default=0.8,
     help="MixUp alpha",
@@ -359,6 +367,7 @@ learning_rate = args.learning_rate
 optimizer_eps = args.optimizer_eps
 grad_clip = args.grad_clip
 weight_decay = args.weight_decay
+loss_weights_file = args.loss_weights_file
 freeze_model_body = args.freeze_model_body
 
 # Augmentations hyperparams
@@ -389,6 +398,7 @@ train_config["learning_rate"] = learning_rate
 train_config["optimizer_eps"] = optimizer_eps
 train_config["grad_clip"] = grad_clip
 train_config["weight_decay"] = weight_decay
+train_config["loss_weights_file"] = loss_weights_file
 train_config["noise_level"] = noise_level
 train_config["mixup_alpha"] = mixup_alpha
 train_config["rotation_ratio"] = rotation_ratio
@@ -558,6 +568,13 @@ if latest_epoch is not None:
 else:
     latest_epoch = 0
 
+# TODO: maybe the weights should be included in the TrainState?
+if loss_weights_file:
+    label_weights = np.load(loss_weights_file, allow_pickle=False)
+else:
+    label_weights = np.array([1.0]).astype(np.float32)
+label_weights = jax_utils.replicate(label_weights)
+
 step = int(state.step)
 state = jax_utils.replicate(state)
 p_train_step = jax.pmap(train_step, axis_name="batch")
@@ -568,7 +585,12 @@ pbar = tqdm(total=num_steps_per_epoch)
 for batch in train_ds:
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
-    state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
+    state = p_train_step(
+        state=state,
+        batch=batch,
+        weights=label_weights,
+        dropout_key=dropout_keys,
+    )
 
     if step % 224 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
