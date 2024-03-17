@@ -130,6 +130,7 @@ class PatchEmbed(linen.Module):
         embed_dim (int): Number of linear projection output channels. Default: 96.
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
+
     patch_size: int = 4
     embed_dim: int = 96
     use_conv_bias: bool = True

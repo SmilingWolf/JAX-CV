@@ -291,6 +291,7 @@ class SwinTransformerBlock(linen.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
         pretrained_window_size (int): Window size in pre-training.
     """
+
     dim: int
     input_resolution: Tuple[int]
     num_heads: int
@@ -428,6 +429,7 @@ class PatchMerging(linen.Module):
         input_resolution (tuple[int]): Resolution of input feature.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
+
     input_resolution: Tuple[int]
     norm_layer: Callable = linen.LayerNorm
     dtype: Any = jnp.float32
@@ -534,6 +536,7 @@ class PatchEmbed(linen.Module):
         embed_dim (int): Number of linear projection output channels. Default: 96.
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
+
     patch_size: int = 4
     embed_dim: int = 96
     norm_layer: Callable = None

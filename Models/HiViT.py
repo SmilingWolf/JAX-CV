@@ -126,6 +126,7 @@ class PatchMerging(linen.Module):
         input_resolution (tuple[int]): Resolution of input feature.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
+
     input_resolution: Tuple[int]
     norm_layer: Callable = linen.LayerNorm
 
@@ -187,6 +188,7 @@ class PatchEmbed(linen.Module):
         embed_dim (int): Number of linear projection output channels. Default: 96.
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
+
     patch_size: int = 4
     embed_dim: int = 96
     internal_patches: int = 4
