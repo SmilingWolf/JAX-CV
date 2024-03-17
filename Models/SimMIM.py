@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from flax import linen
 
 from .ConvNext import ConvNext
+from .EVA02 import EVA02Transformer
 from .HiViT import HierarchicalViT
 from .SwinV2 import SwinTransformerV2
 from .ViT import VisionTransformer
@@ -197,6 +198,42 @@ class ConvNextForSimMIM(ConvNext):
 
     def get_stride(self):
         return 32
+
+
+class EVA02ForSimMIM(EVA02Transformer):
+    def setup(self):
+        super().setup()
+
+        token_init = linen.initializers.normal(0.02)
+        self.mask_token = self.param("mask_token", token_init, (1, 1, self.embed_dim))
+
+    def __call__(self, x, mask, train: bool = False):
+        x = self.patch_embed(x)
+
+        B, L, _ = x.shape
+        mask_tokens = jnp.broadcast_to(self.mask_token, (B, L, self.embed_dim))
+        mask = jnp.reshape(mask, (B, L, 1)).astype(mask_tokens.dtype)
+        x = x * (1.0 - mask) + mask_tokens * mask
+
+        B, L, C = x.shape
+        b_cls = jnp.broadcast_to(self.cls_token, (B, 1, C))
+        x = jnp.concatenate([b_cls, x], axis=1)
+
+        x = self.pos_emb(x)
+
+        for layer in self.eva02_body:
+            x = layer(x, train=train)
+
+        x = x[:, 1:, :]
+        x = self.norm(x)
+
+        B, L, C = x.shape
+        H = W = int(L**0.5)
+        x = jnp.reshape(x, (B, H, W, C))
+        return x
+
+    def get_stride(self):
+        return self.patch_size
 
 
 class SimMIM(linen.Module):
@@ -445,6 +482,60 @@ def simmim_convnext_base(**kwargs):
     config = {
         "encoder": encoder,
         "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_eva02_small():
+    config = {
+        "num_layers": 12,
+        "embed_dim": 384,
+        "mlp_dim": (384 * 4 * 2) // 3,
+        "num_heads": 6,
+        "scale_mlp": False,
+    }
+    encoder = EVA02ForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.get_stride(),
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_eva02_base():
+    config = {
+        "num_layers": 12,
+        "embed_dim": 768,
+        "mlp_dim": (768 * 4 * 2) // 3,
+        "num_heads": 12,
+        "scale_mlp": True,
+    }
+    encoder = EVA02ForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.patch_size,
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
+def simmim_eva02_large():
+    config = {
+        "num_layers": 24,
+        "embed_dim": 1024,
+        "mlp_dim": (1024 * 4 * 2) // 3,
+        "num_heads": 16,
+        "scale_mlp": True,
+    }
+    encoder = EVA02ForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.patch_size,
         "patch_size": encoder.patch_size,
     }
     return SimMIM(**config)
