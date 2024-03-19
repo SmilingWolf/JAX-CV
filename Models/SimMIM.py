@@ -224,8 +224,8 @@ class EVA02ForSimMIM(EVA02Transformer):
         for layer in self.eva02_body:
             x = layer(x, train=train)
 
-        x = x[:, 1:, :]
         x = self.norm(x)
+        x = x[:, 1:]
 
         B, L, C = x.shape
         H = W = int(L**0.5)
