@@ -36,6 +36,7 @@ def create_optimizer_tx(
     module,
     params,
     learning_rate: Union[float, Callable],
+    optimizer_eps: float,
     grad_clip: float,
     weight_decay: float,
     freeze_model_body: bool,
@@ -44,7 +45,12 @@ def create_optimizer_tx(
         return "trainable" if "head" in path else "frozen"
 
     wd_mask = jax.tree_util.tree_map_with_path(module.should_decay, params)
-    tx = optax.lamb(learning_rate, weight_decay=weight_decay, mask=wd_mask)
+    tx = optax.lamb(
+        learning_rate,
+        weight_decay=weight_decay,
+        eps=optimizer_eps,
+        mask=wd_mask,
+    )
     tx = optax.chain(optax.clip_by_global_norm(grad_clip), tx)
 
     if freeze_model_body:
@@ -60,6 +66,7 @@ def create_train_state(
     target_size: int,
     num_classes: int,
     learning_rate: Union[float, Callable],
+    optimizer_eps: float,
     grad_clip: float,
     weight_decay: float,
     freeze_model_body: bool = False,
@@ -94,6 +101,7 @@ def create_train_state(
         module,
         params,
         learning_rate,
+        optimizer_eps,
         grad_clip,
         weight_decay,
         freeze_model_body,
@@ -270,6 +278,12 @@ parser.add_argument(
     type=float,
 )
 parser.add_argument(
+    "--optimizer-eps",
+    default=1e-6,
+    help="Optimizer epsilon",
+    type=float,
+)
+parser.add_argument(
     "--grad-clip",
     default=1.0,
     help="Gradient clipping",
@@ -342,6 +356,7 @@ val_samples = dataset_specs["val_samples"]
 # Model hyperparams
 patch_size = args.patch_size
 learning_rate = args.learning_rate
+optimizer_eps = args.optimizer_eps
 grad_clip = args.grad_clip
 weight_decay = args.weight_decay
 freeze_model_body = args.freeze_model_body
@@ -371,6 +386,7 @@ train_config["train_samples"] = train_samples
 train_config["val_samples"] = val_samples
 train_config["patch_size"] = patch_size
 train_config["learning_rate"] = learning_rate
+train_config["optimizer_eps"] = optimizer_eps
 train_config["grad_clip"] = grad_clip
 train_config["weight_decay"] = weight_decay
 train_config["noise_level"] = noise_level
@@ -476,6 +492,7 @@ state = create_train_state(
     image_size,
     num_classes,
     learning_rate,
+    optimizer_eps,
     grad_clip,
     weight_decay,
     freeze_model_body,
