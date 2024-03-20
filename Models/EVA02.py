@@ -264,7 +264,7 @@ class EVA02Transformer(linen.Module):
 
     norm_layer: Callable = linen.LayerNorm
 
-    layer_norm_eps: float = 1e-5
+    layer_norm_eps: float = 1e-6
     dtype: Any = jnp.float32
 
     def setup(self):
@@ -328,7 +328,7 @@ class EVA02Transformer(linen.Module):
         for layer in self.eva02_body:
             x = layer(x, train=train)
 
-        x = x[:, 1:, :]
+        x = x[:, 1:]
         x = jnp.mean(x, axis=(1,))
         x = self.norm(x)
         x = self.head(x)
