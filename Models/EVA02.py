@@ -51,11 +51,10 @@ class VisionRotaryEmbeddingFast(linen.Module):
         return x
 
     def setup(self):
-        freqs = 1.0 / (
-            self.theta ** (np.arange(0, self.dim, 2)[: (self.dim // 2)] / self.dim)
-        )
+        exp = np.arange(0, self.dim, 2)[: (self.dim // 2)].astype(np.float32) / self.dim
+        freqs = 1.0 / (self.theta**exp)
 
-        t = np.arange(self.seq_len)
+        t = np.arange(self.seq_len).astype(np.float32)
 
         freqs = np.einsum("..., f -> ... f", t, freqs)
         freqs = einops.repeat(freqs, "... n -> ... (n r)", r=2)
