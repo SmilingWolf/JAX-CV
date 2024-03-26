@@ -51,9 +51,8 @@ class VisionRotaryEmbeddingFast(linen.Module):
         return x
 
     def setup(self):
-        freqs = 1.0 / (
-            self.theta ** (np.arange(0, self.dim, 2)[: (self.dim // 2)] / self.dim)
-        )
+        exp = np.arange(0, self.dim, 2) / -self.dim
+        freqs = self.theta**exp
 
         t = np.arange(self.seq_len)
 
