@@ -86,6 +86,8 @@ class Attention(linen.Module):
     rope: Callable
 
     qkv_bias: bool = True
+    proj_bias: bool = True
+
     attn_drop_ratio: float = 0.0
     proj_drop_ratio: float = 0.0
 
@@ -94,7 +96,7 @@ class Attention(linen.Module):
     def setup(self):
         self.qkv = linen.Dense(self.dim * 3, use_bias=self.qkv_bias, dtype=self.dtype)
         self.attn_drop = linen.Dropout(self.attn_drop_ratio)
-        self.proj = linen.Dense(self.dim, dtype=self.dtype)
+        self.proj = linen.Dense(self.dim, use_bias=self.proj_bias, dtype=self.dtype)
         self.proj_drop = linen.Dropout(self.proj_drop_ratio)
         self.softmax = partial(linen.activation.softmax, axis=-1)
 
@@ -134,6 +136,8 @@ class SwiGLU(linen.Module):
     scale_mlp: bool
     norm_layer: Callable
 
+    use_bias: bool = True
+
     act_layer: Callable = linen.silu
     drop_ratio: float = 0.0
 
@@ -143,7 +147,11 @@ class SwiGLU(linen.Module):
     def __call__(self, x, train: bool):
         out_dim = x.shape[-1]
 
-        x = linen.Dense(self.hidden_features * 2, dtype=self.dtype)(x)
+        x = linen.Dense(
+            self.hidden_features * 2,
+            use_bias=self.use_bias,
+            dtype=self.dtype,
+        )(x)
         x1 = x[..., : self.hidden_features]
         x2 = x[..., self.hidden_features :]
 
@@ -153,7 +161,7 @@ class SwiGLU(linen.Module):
         if self.scale_mlp:
             x = self.norm_layer()(x)
 
-        x = linen.Dense(out_dim, dtype=self.dtype)(x)
+        x = linen.Dense(out_dim, use_bias=self.use_bias, dtype=self.dtype)(x)
         return x
 
 
@@ -182,6 +190,8 @@ class PatchEmbed(linen.Module):
     patch_size: int = 16
     embed_dim: int = 768
 
+    use_bias: bool = True
+
     norm_layer: Callable = None
 
     dtype: Any = jnp.float32
@@ -195,6 +205,7 @@ class PatchEmbed(linen.Module):
             self.embed_dim,
             kernel_size=patch_size,
             strides=patch_size,
+            use_bias=self.use_bias,
             dtype=self.dtype,
         )(x)
         x = jnp.reshape(x, (B, -1, self.embed_dim))
@@ -210,6 +221,8 @@ class EVA02TransformerBlock(linen.Module):
 
     scale_mlp: bool
 
+    use_bias: bool
+
     norm_layer: Callable
     rope: Callable
 
@@ -224,6 +237,8 @@ class EVA02TransformerBlock(linen.Module):
             dim=x.shape[-1],
             num_heads=self.num_heads,
             rope=self.rope,
+            qkv_bias=self.use_bias,
+            proj_bias=self.use_bias,
             dtype=self.dtype,
         )(x, train=train)
         x = linen.Dropout(
@@ -237,6 +252,7 @@ class EVA02TransformerBlock(linen.Module):
         x = SwiGLU(
             hidden_features=self.mlp_dim,
             scale_mlp=self.scale_mlp,
+            use_bias=self.use_bias,
             norm_layer=self.norm_layer,
             dtype=self.dtype,
         )(x, train=train)
@@ -262,6 +278,9 @@ class EVA02Transformer(linen.Module):
 
     drop_path_rate: float = 0.1
 
+    use_norm_bias: bool = True
+    use_linear_bias: bool = True
+
     norm_layer: Callable = linen.LayerNorm
 
     layer_norm_eps: float = 1e-6
@@ -271,12 +290,14 @@ class EVA02Transformer(linen.Module):
         norm_layer = partial(
             self.norm_layer,
             epsilon=self.layer_norm_eps,
+            use_bias=self.use_norm_bias,
             dtype=self.dtype,
         )
 
         self.patch_embed = PatchEmbed(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
+            use_bias=self.use_linear_bias,
             dtype=self.dtype,
         )
 
@@ -301,6 +322,7 @@ class EVA02Transformer(linen.Module):
                 num_heads=self.num_heads,
                 scale_mlp=self.scale_mlp,
                 drop_path_ratio=dpr[i],
+                use_bias=self.use_linear_bias,
                 norm_layer=norm_layer,
                 rope=self.rope_emb,
                 dtype=self.dtype,
@@ -310,7 +332,11 @@ class EVA02Transformer(linen.Module):
 
         self.norm = norm_layer()
         self.head = (
-            linen.Dense(self.num_classes, dtype=self.dtype)
+            linen.Dense(
+                self.num_classes,
+                use_bias=self.use_linear_bias,
+                dtype=self.dtype,
+            )
             if self.num_classes > 0
             else lambda x: x
         )
@@ -348,6 +374,34 @@ class EVA02Transformer(linen.Module):
             help="Stochastic depth rate",
             type=float,
         )
+
+        parser.add_argument(
+            "--enable-linear-bias",
+            dest="use_linear_bias",
+            help="Enable linear layers bias",
+            action="store_true",
+        )
+        parser.add_argument(
+            "--disable-linear-bias",
+            dest="use_linear_bias",
+            help="Disable linear layers bias",
+            action="store_false",
+        )
+        parser.set_defaults(use_linear_bias=self.use_linear_bias)
+
+        parser.add_argument(
+            "--enable-norm-bias",
+            dest="use_norm_bias",
+            help="Enable norm layers bias",
+            action="store_true",
+        )
+        parser.add_argument(
+            "--disable-norm-bias",
+            dest="use_norm_bias",
+            help="Disable norm layers bias",
+            action="store_false",
+        )
+        parser.set_defaults(use_norm_bias=self.use_norm_bias)
         return parser
 
     @staticmethod
