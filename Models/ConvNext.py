@@ -1,8 +1,9 @@
 import dataclasses
 from functools import partial
-from typing import Any, Callable, Tuple
+from typing import Callable
 
 import jax.numpy as jnp
+import jax.typing as jt
 import numpy as np
 from flax import linen
 
@@ -11,7 +12,7 @@ class LayerScale(linen.Module):
     dim: int
     layer_scale_init_value: float = 1e-6
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         self.gamma = self.variable(
@@ -22,7 +23,7 @@ class LayerScale(linen.Module):
         ).value
 
     def __call__(self, x):
-        return x * self.dtype(self.gamma)
+        return x * self.gamma.astype(self.dtype)
 
 
 class ConvNextBlock(linen.Module):
@@ -34,7 +35,7 @@ class ConvNextBlock(linen.Module):
 
     norm_layer: Callable = linen.LayerNorm
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool = False):
@@ -84,7 +85,7 @@ class BasicLayer(linen.Module):
     depth: int
     embed_dim: int
 
-    drop_path_ratio: Tuple[float]
+    drop_path_ratio: tuple[float, ...]
 
     downsample: bool = True
     bottleneck_ratio: float = 4.0
@@ -93,7 +94,7 @@ class BasicLayer(linen.Module):
 
     norm_layer: Callable = linen.LayerNorm
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool = False):
@@ -135,7 +136,7 @@ class PatchEmbed(linen.Module):
     embed_dim: int = 96
     use_conv_bias: bool = True
     norm_layer: Callable = linen.LayerNorm
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
@@ -171,8 +172,8 @@ class ConvNext(linen.Module):
     patch_size: int = 4
     num_classes: int = 1000
 
-    depths: Tuple[int] = (3, 3, 27, 3)
-    embed_dims: Tuple[int] = (128, 256, 512, 1024)
+    depths: tuple[int, ...] = (3, 3, 27, 3)
+    embed_dims: tuple[int, ...] = (128, 256, 512, 1024)
 
     drop_path_rate: float = 0.1
 
@@ -182,7 +183,7 @@ class ConvNext(linen.Module):
     norm_layer: Callable = linen.LayerNorm
 
     layer_norm_eps: float = 1e-6
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         depths = self.depths
@@ -206,15 +207,17 @@ class ConvNext(linen.Module):
         )
 
         # stochastic depth with linear decay
-        dpr = [float(x) for x in np.linspace(0, self.drop_path_rate, sum(depths))]
+        dpr = np.linspace(0, self.drop_path_rate, sum(depths))
+        dpr = [float(x) for x in dpr]
 
         # build layers
         convnext_body = []
         for i_layer in range(num_layers):
+            dpr_slice = tuple(dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])])
             layer = BasicLayer(
                 depth=depths[i_layer],
                 embed_dim=self.embed_dims[i_layer],
-                drop_path_ratio=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
+                drop_path_ratio=dpr_slice,
                 downsample=i_layer > 0,
                 layer_scale_init_value=layer_scale_init_value,
                 use_conv_bias=self.use_conv_bias,

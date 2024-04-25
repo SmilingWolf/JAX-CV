@@ -1,9 +1,10 @@
 import dataclasses
 from functools import partial
-from typing import Any, Callable, Tuple, Union
+from typing import Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import jax.typing as jt
 import numpy as np
 from flax import linen
 
@@ -12,7 +13,7 @@ class MLP(linen.Module):
     hidden_features: int
     act_layer: Callable = linen.gelu
     drop_ratio: float = 0.0
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool):
@@ -27,10 +28,10 @@ class MLP(linen.Module):
 
 
 class RelativePositionBias(linen.Module):
-    window_size: Tuple[int]
+    window_size: tuple[int, int]
     num_heads: int
-    pretrained_window_size: Tuple[int]
-    dtype: Any = jnp.float32
+    pretrained_window_size: tuple[int, int]
+    dtype: jt.DTypeLike = jnp.float32
 
     def get_relative_coords_table(self):
         coords_h = np.arange(-(self.window_size[0] - 1), self.window_size[0])
@@ -41,7 +42,7 @@ class RelativePositionBias(linen.Module):
         coords_table = np.stack(coords_table)
         coords_table = np.transpose(coords_table, (1, 2, 0))
         coords_table = np.expand_dims(coords_table, 0)
-        coords_table = np.float32(coords_table)
+        coords_table = coords_table.astype(np.float32)
 
         if self.pretrained_window_size[0] > 0:
             coords_table[:, :, :, 0] = coords_table[:, :, :, 0] / (
@@ -158,13 +159,13 @@ class WindowAttention(linen.Module):
     """
 
     dim: int
-    window_size: Tuple[int]  # Wh, Ww
+    window_size: tuple[int, int]  # Wh, Ww
     num_heads: int
     qkv_bias: bool = True
     attn_drop_ratio: float = 0.0
     proj_drop_ratio: float = 0.0
-    pretrained_window_size: Tuple[int] = (0, 0)
-    dtype: Any = jnp.float32
+    pretrained_window_size: tuple[int, int] = (0, 0)
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         self.logit_scale = self.variable(
@@ -179,9 +180,6 @@ class WindowAttention(linen.Module):
             bias_init = linen.initializers.zeros_init()
             self.q_bias = self.param("q_bias", bias_init, (self.dim,))
             self.v_bias = self.param("v_bias", bias_init, (self.dim,))
-        else:
-            self.q_bias = None
-            self.v_bias = None
 
         self.attention_bias = RelativePositionBias(
             self.window_size,
@@ -193,7 +191,7 @@ class WindowAttention(linen.Module):
         self.attn_drop = linen.Dropout(self.attn_drop_ratio)
         self.proj = linen.Dense(self.dim, dtype=self.dtype)
         self.proj_drop = linen.Dropout(self.proj_drop_ratio)
-        self.softmax = partial(linen.activation.softmax, axis=-1)
+        self.softmax = partial(linen.softmax, axis=-1)
 
     def __call__(self, x, train: bool, mask=None):
         """
@@ -205,11 +203,8 @@ class WindowAttention(linen.Module):
 
         qkv = self.qkv(x)
         if self.qkv_bias:
-            q_bias, v_bias = linen.dtypes.promote_dtype(
-                self.q_bias,
-                self.v_bias,
-                dtype=self.dtype,
-            )
+            q_bias = self.q_bias.astype(self.dtype)
+            v_bias = self.v_bias.astype(self.dtype)
             qkv_bias = jnp.concatenate(
                 (
                     q_bias,
@@ -228,7 +223,7 @@ class WindowAttention(linen.Module):
         attn = q_norm @ jnp.transpose(k_norm, (0, 1, 3, 2))
 
         logit_scale = jnp.minimum(self.logit_scale, np.log(100.0))
-        logit_scale = linen.dtypes.promote_dtype(logit_scale, dtype=self.dtype)[0]
+        logit_scale = logit_scale.astype(self.dtype)
         logit_scale = jnp.exp(logit_scale)
         attn = attn * logit_scale
 
@@ -236,7 +231,7 @@ class WindowAttention(linen.Module):
 
         if mask is not None:
             nW = mask.shape[0]
-            mask = linen.dtypes.promote_dtype(mask, dtype=self.dtype)[0]
+            mask = mask.astype(self.dtype)
             mask = jnp.expand_dims(jnp.expand_dims(mask, 1), 0)
             attn = jnp.reshape(attn, (B_ // nW, nW, self.num_heads, N, N)) + mask
             attn = jnp.reshape(attn, (-1, self.num_heads, N, N))
@@ -293,7 +288,7 @@ class SwinTransformerBlock(linen.Module):
     """
 
     dim: int
-    input_resolution: Tuple[int]
+    input_resolution: tuple[int, int]
     num_heads: int
     window_size: int = 7
     shift_size: int = 0
@@ -305,7 +300,7 @@ class SwinTransformerBlock(linen.Module):
     act_layer: Callable = linen.gelu
     norm_layer: Callable = linen.LayerNorm
     pretrained_window_size: int = 0
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         self.norm1 = self.norm_layer()
@@ -430,9 +425,9 @@ class PatchMerging(linen.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    input_resolution: Tuple[int]
+    input_resolution: tuple[int, int]
     norm_layer: Callable = linen.LayerNorm
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
@@ -472,7 +467,7 @@ class BasicLayer(linen.Module):
     """
 
     dim: int
-    input_resolution: Tuple[int]
+    input_resolution: tuple[int, int]
     depth: int
     num_heads: int
     window_size: int
@@ -480,11 +475,11 @@ class BasicLayer(linen.Module):
     qkv_bias: bool = True
     drop_ratio: float = 0.0
     attn_drop_ratio: float = 0.0
-    drop_path_ratio: Union[float, Tuple[float]] = 0.0
+    drop_path_ratio: Union[float, tuple[float, ...]] = 0.0
     norm_layer: Callable = linen.LayerNorm
-    downsample: Callable = None
+    downsample: Optional[Callable] = None
     pretrained_window_size: int = 0
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool):
@@ -539,8 +534,8 @@ class PatchEmbed(linen.Module):
 
     patch_size: int = 4
     embed_dim: int = 96
-    norm_layer: Callable = None
-    dtype: Any = jnp.float32
+    norm_layer: Optional[Callable] = None
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
@@ -589,8 +584,8 @@ class SwinTransformerV2(linen.Module):
     num_classes: int = 1000
 
     embed_dim: int = 96
-    depths: Tuple[int] = (2, 2, 6, 2)
-    num_heads: Tuple[int] = (3, 6, 12, 24)
+    depths: tuple[int, ...] = (2, 2, 6, 2)
+    num_heads: tuple[int, ...] = (3, 6, 12, 24)
 
     window_size: int = 7
     mlp_ratio: float = 4.0
@@ -603,10 +598,10 @@ class SwinTransformerV2(linen.Module):
     norm_layer: Callable = linen.LayerNorm
     patch_norm: bool = True
 
-    pretrained_window_sizes: Tuple[int] = (0, 0, 0, 0)
+    pretrained_window_sizes: tuple[int, ...] = (0, 0, 0, 0)
 
     layer_norm_eps: float = 1e-5
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         depths = self.depths
@@ -636,6 +631,7 @@ class SwinTransformerV2(linen.Module):
         # build layers
         swin_body = []
         for i_layer in range(num_layers):
+            dpr_slice = tuple(dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])])
             layer = BasicLayer(
                 dim=int(self.embed_dim * 2**i_layer),
                 input_resolution=(
@@ -649,7 +645,7 @@ class SwinTransformerV2(linen.Module):
                 qkv_bias=self.qkv_bias,
                 drop_ratio=self.drop_rate,
                 attn_drop_ratio=self.attn_drop_rate,
-                drop_path_ratio=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
+                drop_path_ratio=dpr_slice,
                 norm_layer=norm_layer,
                 downsample=PatchMerging if (i_layer < num_layers - 1) else None,
                 pretrained_window_size=self.pretrained_window_sizes[i_layer],
@@ -723,7 +719,7 @@ def swinv2_tiny():
     return SwinTransformerV2(**config)
 
 
-def swinv2_base(**kwargs):
+def swinv2_base():
     config = {
         "embed_dim": 128,
         "depths": (2, 2, 18, 2),
@@ -732,7 +728,7 @@ def swinv2_base(**kwargs):
     return SwinTransformerV2(**config)
 
 
-def swinv2_large(**kwargs):
+def swinv2_large():
     config = {
         "embed_dim": 192,
         "depths": (2, 2, 18, 2),

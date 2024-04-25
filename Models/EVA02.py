@@ -1,9 +1,10 @@
 import dataclasses
 from functools import partial
-from typing import Any, Callable
+from typing import Callable, Optional
 
 import einops
 import jax.numpy as jnp
+import jax.typing as jt
 import numpy as np
 from flax import linen
 
@@ -90,14 +91,14 @@ class Attention(linen.Module):
     attn_drop_ratio: float = 0.0
     proj_drop_ratio: float = 0.0
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         self.qkv = linen.Dense(self.dim * 3, use_bias=self.qkv_bias, dtype=self.dtype)
         self.attn_drop = linen.Dropout(self.attn_drop_ratio)
         self.proj = linen.Dense(self.dim, use_bias=self.proj_bias, dtype=self.dtype)
         self.proj_drop = linen.Dropout(self.proj_drop_ratio)
-        self.softmax = partial(linen.activation.softmax, axis=-1)
+        self.softmax = partial(linen.softmax, axis=-1)
 
     def __call__(self, x, train: bool = False):
         B, N, C = x.shape
@@ -140,7 +141,7 @@ class SwiGLU(linen.Module):
     act_layer: Callable = linen.silu
     drop_ratio: float = 0.0
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool):
@@ -165,14 +166,14 @@ class SwiGLU(linen.Module):
 
 
 class PosEmbed(linen.Module):
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
         _, L, C = x.shape
         pos_emb_init = linen.initializers.normal(stddev=1 / np.sqrt(C))
         pos_emb = self.param("pos_emb", pos_emb_init, (1, L, C))
-        pos_emb = linen.dtypes.promote_dtype(pos_emb, dtype=self.dtype)[0]
+        pos_emb = pos_emb.astype(self.dtype)
         x = x + pos_emb
         return x
 
@@ -191,9 +192,9 @@ class PatchEmbed(linen.Module):
 
     use_bias: bool = True
 
-    norm_layer: Callable = None
+    norm_layer: Optional[Callable] = None
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
@@ -225,7 +226,7 @@ class EVA02TransformerBlock(linen.Module):
     norm_layer: Callable
     rope: Callable
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool = False):
@@ -283,7 +284,7 @@ class EVA02Transformer(linen.Module):
     norm_layer: Callable = linen.LayerNorm
 
     layer_norm_eps: float = 1e-6
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         norm_layer = partial(
@@ -315,12 +316,12 @@ class EVA02Transformer(linen.Module):
         dpr = [float(x) for x in dpr]
 
         eva02_body = []
-        for i in range(self.num_layers):
+        for i_layer in range(self.num_layers):
             layer = EVA02TransformerBlock(
                 mlp_dim=self.mlp_dim,
                 num_heads=self.num_heads,
                 scale_mlp=self.scale_mlp,
-                drop_path_ratio=dpr[i],
+                drop_path_ratio=dpr[i_layer],
                 use_bias=self.use_linear_bias,
                 norm_layer=norm_layer,
                 rope=self.rope_emb,

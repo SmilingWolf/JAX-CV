@@ -1,8 +1,9 @@
 import dataclasses
 from functools import partial
-from typing import Any, Callable
+from typing import Callable, Optional
 
 import jax.numpy as jnp
+import jax.typing as jt
 import numpy as np
 from flax import linen
 
@@ -14,14 +15,14 @@ class Attention(linen.Module):
     attn_drop_ratio: float = 0.0
     proj_drop_ratio: float = 0.0
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         self.qkv = linen.Dense(self.dim * 3, use_bias=self.qkv_bias, dtype=self.dtype)
         self.attn_drop = linen.Dropout(self.attn_drop_ratio)
         self.proj = linen.Dense(self.dim, dtype=self.dtype)
         self.proj_drop = linen.Dropout(self.proj_drop_ratio)
-        self.softmax = partial(linen.activation.softmax, axis=-1)
+        self.softmax = partial(linen.softmax, axis=-1)
 
     def __call__(self, x, train: bool = False):
         B, N, C = x.shape
@@ -49,7 +50,7 @@ class MLP(linen.Module):
     act_layer: Callable = linen.gelu
     drop_ratio: float = 0.0
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool):
@@ -63,14 +64,14 @@ class MLP(linen.Module):
 
 
 class PosEmbed(linen.Module):
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
         _, L, C = x.shape
         pos_emb_init = linen.initializers.normal(stddev=1 / np.sqrt(C))
         pos_emb = self.param("pos_emb", pos_emb_init, (1, L, C))
-        pos_emb = linen.dtypes.promote_dtype(pos_emb, dtype=self.dtype)[0]
+        pos_emb = pos_emb.astype(self.dtype)
         x = x + pos_emb
         return x
 
@@ -87,9 +88,9 @@ class PatchEmbed(linen.Module):
     patch_size: int = 16
     embed_dim: int = 768
 
-    norm_layer: Callable = None
+    norm_layer: Optional[Callable] = None
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
@@ -115,7 +116,7 @@ class VisionTransformerBlock(linen.Module):
 
     norm_layer: Callable
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool = False):
@@ -158,7 +159,7 @@ class VisionTransformer(linen.Module):
     norm_layer: Callable = linen.LayerNorm
 
     layer_norm_eps: float = 1e-5
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         norm_layer = partial(

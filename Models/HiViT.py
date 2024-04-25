@@ -1,8 +1,9 @@
 import dataclasses
 from functools import partial
-from typing import Any, Callable, Tuple, Union
+from typing import Callable, Optional, Union
 
 import jax.numpy as jnp
+import jax.typing as jt
 import numpy as np
 from flax import linen
 
@@ -11,7 +12,7 @@ class RelativePositionBias(linen.Module):
     input_size: int
     num_heads: int
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def get_relative_position_index(self):
         # get pair-wise relative position index for each token inside the window
@@ -77,7 +78,7 @@ class Attention(linen.Module):
     proj_drop_ratio: float = 0.0
     rpe_enabled: bool = True
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
         self.attention_bias = (
@@ -94,7 +95,7 @@ class Attention(linen.Module):
         self.attn_drop = linen.Dropout(self.attn_drop_ratio)
         self.proj = linen.Dense(self.dim, dtype=self.dtype)
         self.proj_drop = linen.Dropout(self.proj_drop_ratio)
-        self.softmax = partial(linen.activation.softmax, axis=-1)
+        self.softmax = partial(linen.softmax, axis=-1)
 
     def __call__(self, x, train: bool = False):
         B, N, C = x.shape
@@ -127,10 +128,10 @@ class PatchMerging(linen.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    input_resolution: Tuple[int]
+    input_resolution: tuple[int, int]
     norm_layer: Callable = linen.LayerNorm
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
@@ -154,7 +155,7 @@ class MLP(linen.Module):
     act_layer: Callable = linen.gelu
     drop_ratio: float = 0.0
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool):
@@ -168,14 +169,14 @@ class MLP(linen.Module):
 
 
 class PosEmbed(linen.Module):
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x):
         _, L, C = x.shape
         pos_emb_init = linen.initializers.normal(stddev=1 / np.sqrt(C))
         pos_emb = self.param("pos_emb", pos_emb_init, (1, L, C))
-        pos_emb = linen.dtypes.promote_dtype(pos_emb, dtype=self.dtype)[0]
+        pos_emb = pos_emb.astype(self.dtype)
         x = x + pos_emb
         return x
 
@@ -193,9 +194,9 @@ class PatchEmbed(linen.Module):
     embed_dim: int = 96
     internal_patches: int = 4
 
-    norm_layer: Callable = None
+    norm_layer: Optional[Callable] = None
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def patches_reshape(self, x):
         B, H, W, C = x.shape
@@ -228,12 +229,12 @@ class PatchEmbed(linen.Module):
 
 class HierarchicalViTBlock(linen.Module):
     mlp_dim: int
-    num_heads: int
+    num_heads: Union[None, int]
     drop_path_ratio: float
 
     norm_layer: Callable
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool = False):
@@ -271,16 +272,16 @@ class HierarchicalViTBlock(linen.Module):
 class BasicLayer(linen.Module):
     depth: int
 
-    num_heads: int = 12
+    num_heads: Union[None, int] = 12
     mlp_ratio: float = 4.0
     pos_emb_enabled: bool = False
-    drop_path_ratio: Union[float, Tuple[float]] = 0.1
+    drop_path_ratio: tuple[float, ...] = (0.0,)
 
     downsample: Union[None, Callable] = None
 
     norm_layer: Callable = linen.LayerNorm
 
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     @linen.compact
     def __call__(self, x, train: bool = False):
@@ -315,10 +316,10 @@ class HierarchicalViT(linen.Module):
     patch_size: int = 4
     num_classes: int = 1000
 
-    depths: Tuple[int] = (2, 2, 20)
+    depths: tuple[int, ...] = (2, 2, 20)
     embed_dim: int = 192
-    mlp_ratio: Tuple[float] = (3.0, 3.0, 4.0)
-    num_heads: Tuple[int] = (None, None, 12)
+    mlp_ratio: tuple[float, ...] = (3.0, 3.0, 4.0)
+    num_heads: tuple[Union[None, int], ...] = (None, None, 12)
     pos_emb_delay: int = 2
 
     drop_path_rate: float = 0.1
@@ -326,10 +327,11 @@ class HierarchicalViT(linen.Module):
     norm_layer: Callable = linen.LayerNorm
 
     layer_norm_eps: float = 1e-6
-    dtype: Any = jnp.float32
+    dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
-        num_layers = len(self.depths)
+        depths = self.depths
+        num_layers = len(depths)
         norm_layer = partial(
             self.norm_layer,
             epsilon=self.layer_norm_eps,
@@ -344,24 +346,24 @@ class HierarchicalViT(linen.Module):
         )
 
         # stochastic depth with linear decay
-        dpr = np.linspace(0, self.drop_path_rate, sum(self.depths))
+        dpr = np.linspace(0, self.drop_path_rate, sum(depths))
         dpr = [float(x) for x in dpr]
 
-        vit_body = []
-        for i in range(num_layers):
-            dpr_slice = tuple(dpr[sum(self.depths[:i]) : sum(self.depths[: i + 1])])
+        hivit_body = []
+        for i_layer in range(num_layers):
+            dpr_slice = tuple(dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])])
             layer = BasicLayer(
-                depth=self.depths[i],
-                mlp_ratio=self.mlp_ratio[i],
-                num_heads=self.num_heads[i],
-                pos_emb_enabled=i == self.pos_emb_delay,
+                depth=depths[i_layer],
+                mlp_ratio=self.mlp_ratio[i_layer],
+                num_heads=self.num_heads[i_layer],
+                pos_emb_enabled=i_layer == self.pos_emb_delay,
                 drop_path_ratio=dpr_slice,
                 norm_layer=norm_layer,
-                downsample=PatchMerging if (i < num_layers - 1) else None,
+                downsample=PatchMerging if (i_layer < num_layers - 1) else None,
                 dtype=self.dtype,
             )
-            vit_body.append(layer)
-        self.vit_body = vit_body
+            hivit_body.append(layer)
+        self.hivit_body = hivit_body
 
         self.norm = norm_layer()
         self.head = (
@@ -373,7 +375,7 @@ class HierarchicalViT(linen.Module):
     def __call__(self, x, train: bool = False):
         x = self.patch_embed(x)
 
-        for layer in self.vit_body:
+        for layer in self.hivit_body:
             x = layer(x, train=train)
 
         x = jnp.mean(x, axis=(1,))
@@ -407,8 +409,7 @@ class HierarchicalViT(linen.Module):
 
     def should_decay(self, path, _):
         is_kernel = path[-1].key == "kernel"
-        is_scale = path[-1].key == "scale"
-        verdict = is_kernel or is_scale
+        verdict = is_kernel
         return verdict
 
 

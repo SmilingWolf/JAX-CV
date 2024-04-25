@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Tuple
+from typing import Any
 
 import einops
 import jax.numpy as jnp
@@ -13,7 +13,7 @@ from .ViT import VisionTransformer
 
 
 class WindowedNorm(linen.Module):
-    target_size: Tuple[int]
+    target_size: tuple[int, int]
     window_size: int = 47
 
     def get_targets_count(self):
@@ -91,7 +91,7 @@ class SwinTransformerV2ForSimMIM(SwinTransformerV2):
         x = self.patch_embed(x)
 
         B, L, _ = x.shape
-        mask_token = linen.dtypes.promote_dtype(self.mask_token, dtype=self.dtype)[0]
+        mask_token = self.mask_token.astype(self.dtype)
         mask_tokens = jnp.broadcast_to(mask_token, (B, L, self.embed_dim))
         mask = jnp.reshape(mask, (B, L, 1)).astype(mask_tokens.dtype)
         x = x * (1.0 - mask) + mask_tokens * mask
@@ -155,13 +155,13 @@ class HierarchicalViTForSimMIM(HierarchicalViT):
 
         B, L, _ = x.shape
         H = W = int(L**0.5)
-        mask_token = linen.dtypes.promote_dtype(self.mask_token, dtype=self.dtype)[0]
+        mask_token = self.mask_token.astype(self.dtype)
         mask_tokens = jnp.broadcast_to(mask_token, (B, L, self.embed_dim))
         mask = jnp.reshape(mask, (B, H, W, 1)).astype(mask_tokens.dtype)
         mask = self.patch_embed.patches_reshape(mask)
         x = x * (1.0 - mask) + mask_tokens * mask
 
-        for layer in self.vit_body:
+        for layer in self.hivit_body:
             x = layer(x, train=train)
 
         x = self.norm(x)
@@ -275,7 +275,7 @@ class SimMIM(linen.Module):
         if self.enable_windowed_norm:
             x = WindowedNorm(target_size=(H, W), window_size=self.norm_patch_size)(x)
 
-        x_rec = linen.dtypes.promote_dtype(x_rec, dtype=x.dtype)[0]
+        x_rec = x_rec.astype(x.dtype)
         loss_recon = jnp.abs(x - x_rec)
         loss = jnp.sum(loss_recon * mask) / (jnp.sum(mask) + 1e-5) / C
 
@@ -425,7 +425,7 @@ def simmim_hivit_tiny():
     return SimMIM(**config)
 
 
-def simmim_hivit_small(**kwargs):
+def simmim_hivit_small():
     config = {
         "depths": (2, 2, 20),
         "embed_dim": 96,
@@ -442,7 +442,7 @@ def simmim_hivit_small(**kwargs):
     return SimMIM(**config)
 
 
-def simmim_convnext_tiny(**kwargs):
+def simmim_convnext_tiny():
     config = {
         "embed_dims": (96, 192, 384, 768),
         "depths": (3, 3, 9, 3),
@@ -457,7 +457,7 @@ def simmim_convnext_tiny(**kwargs):
     return SimMIM(**config)
 
 
-def simmim_convnext_small(**kwargs):
+def simmim_convnext_small():
     config = {
         "embed_dims": (96, 192, 384, 768),
         "depths": (3, 3, 27, 3),
@@ -472,7 +472,7 @@ def simmim_convnext_small(**kwargs):
     return SimMIM(**config)
 
 
-def simmim_convnext_base(**kwargs):
+def simmim_convnext_base():
     config = {
         "embed_dims": (128, 256, 512, 1024),
         "depths": (3, 3, 27, 3),
