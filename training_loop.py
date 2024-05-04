@@ -574,12 +574,19 @@ def clipper(param, max_stddev=clip_stddev):
 if restore_params_ckpt or restore_simmim_ckpt:
     ckpt_path = restore_params_ckpt if restore_params_ckpt else restore_simmim_ckpt
 
-    throwaway_manager = orbax.checkpoint.CheckpointManager(
-        ckpt_path,
-        orbax_checkpointer,
-    )
-    latest_epoch = throwaway_manager.latest_step()
-    restored = throwaway_manager.restore(latest_epoch)
+    if ckpt_path.endswith(".msgpack"):
+        with open(ckpt_path, "rb") as f:
+            data = f.read()
+
+        restored = flax.serialization.msgpack_restore(data)
+    else:
+        throwaway_manager = orbax.checkpoint.CheckpointManager(
+            ckpt_path,
+            orbax_checkpointer,
+        )
+        latest_epoch = throwaway_manager.latest_step()
+        restored = throwaway_manager.restore(latest_epoch)
+        del throwaway_manager
 
     if restore_params_ckpt and reset_head:
         del restored["model"]["params"]["head"]
@@ -600,7 +607,6 @@ if restore_params_ckpt or restore_simmim_ckpt:
     restored = orbax.checkpoint.apply_transformations(restored, transforms, ckpt)
 
     state = state.replace(params=restored["model"].params)
-    del throwaway_manager
 
 latest_epoch = checkpoint_manager.latest_step()
 if latest_epoch is not None:
