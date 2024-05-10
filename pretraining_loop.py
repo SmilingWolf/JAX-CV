@@ -171,6 +171,12 @@ parser.add_argument(
     type=str,
 )
 parser.add_argument(
+    "--checkpoints-keep",
+    default=2,
+    help="Number of best (by val_loss) checkpoints to keep. -1 to always keep the last checkpoint",
+    type=int,
+)
+parser.add_argument(
     "--epochs",
     default=50,
     help="Number of epochs to train for",
@@ -446,11 +452,17 @@ del params_key
 metrics_history = {"train_loss": [], "val_loss": []}
 ckpt = {"model": state, "metrics_history": metrics_history}
 
-orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-options = orbax.checkpoint.CheckpointManagerOptions(
-    max_to_keep=2,
+options_dict = dict(
+    max_to_keep=args.checkpoints_keep,
     best_fn=lambda metrics: metrics["val_loss"],
     best_mode="min",
+)
+if args.checkpoints_keep == -1:
+    options_dict = dict(max_to_keep=1)
+
+orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+options = orbax.checkpoint.CheckpointManagerOptions(
+    **options_dict,
     create=True,
 )
 checkpoint_manager = orbax.checkpoint.CheckpointManager(
@@ -539,15 +551,16 @@ for batch in train_ds:
             step=(step + 1) // num_steps_per_epoch,
         )
 
-        ckpt["model"] = jax.device_get(jax_utils.unreplicate(state))
-        ckpt["metrics_history"] = metrics_history
-        save_args = orbax_utils.save_args_from_target(ckpt)
-        checkpoint_manager.save(
-            epochs,
-            ckpt,
-            save_kwargs={"save_args": save_args},
-            metrics={"val_loss": float(metrics_history["val_loss"][-1])},
-        )
+        if args.checkpoints_keep > 0:
+            ckpt["model"] = jax.device_get(jax_utils.unreplicate(state))
+            ckpt["metrics_history"] = metrics_history
+            save_args = orbax_utils.save_args_from_target(ckpt)
+            checkpoint_manager.save(
+                epochs,
+                ckpt,
+                save_kwargs={"save_args": save_args},
+                metrics={"val_loss": float(metrics_history["val_loss"][-1])},
+            )
 
         # reset train_metrics for next training epoch
         empty_metrics = state.metrics.empty()

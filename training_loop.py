@@ -650,15 +650,16 @@ for batch in train_ds:
             step=(step + 1) // num_steps_per_epoch,
         )
 
-        ckpt["model"] = jax.device_get(jax_utils.unreplicate(state))
-        ckpt["metrics_history"] = metrics_history
-        save_args = orbax_utils.save_args_from_target(ckpt)
-        checkpoint_manager.save(
-            epochs,
-            ckpt,
-            save_kwargs={"save_args": save_args},
-            metrics={"val_loss": float(metrics_history["val_loss"][-1])},
-        )
+        if args.checkpoints_keep > 0:
+            ckpt["model"] = jax.device_get(jax_utils.unreplicate(state))
+            ckpt["metrics_history"] = metrics_history
+            save_args = orbax_utils.save_args_from_target(ckpt)
+            checkpoint_manager.save(
+                epochs,
+                ckpt,
+                save_kwargs={"save_args": save_args},
+                metrics={"val_loss": float(metrics_history["val_loss"][-1])},
+            )
 
         # reset train_metrics for next training epoch
         empty_metrics = state.metrics.empty()
