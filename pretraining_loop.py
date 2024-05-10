@@ -486,6 +486,7 @@ if latest_epoch is not None:
     restored = checkpoint_manager.restore(latest_epoch, items=ckpt)
     state = restored["model"]
     metrics_history = restored["metrics_history"]
+    state = state.replace(metrics=state.metrics.empty())
 else:
     latest_epoch = 0
 
