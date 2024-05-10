@@ -491,7 +491,8 @@ for batch in train_ds:
 
     if step % 224 == 0:
         merged_metrics = jax_utils.unreplicate(state.metrics)
-        pbar.set_postfix(loss=f"{merged_metrics.loss.compute():.04f}")
+        merged_metrics = jax.device_get(merged_metrics.loss.compute())
+        pbar.set_postfix(loss=f"{merged_metrics:.04f}")
 
     pbar.update(1)
 
@@ -499,24 +500,25 @@ for batch in train_ds:
     if (step + 1) % num_steps_per_epoch == 0:
         # compute metrics
         merged_metrics = jax_utils.unreplicate(state.metrics)
-        for metric, value in merged_metrics.compute().items():
+        merged_metrics = jax.device_get(merged_metrics.compute())
+        for metric, value in merged_metrics.items():
             # record metrics
             metrics_history[f"train_{metric}"].append(value)
 
-        # reset train_metrics for next training epoch
+        # reset train_metrics for validation
         empty_metrics = state.metrics.empty()
         empty_metrics = jax_utils.replicate(empty_metrics)
         state = state.replace(metrics=empty_metrics)
 
         # Compute metrics on the validation set after each training epoch
-        val_state = state
         for val_step, val_batch in enumerate(val_ds):
-            val_state = p_eval_step(state=val_state, batch=val_batch)
+            state = p_eval_step(state=state, batch=val_batch)
             if val_step == val_samples // global_batch_size:
                 break
 
-        val_state = jax_utils.unreplicate(val_state)
-        for metric, value in val_state.metrics.compute().items():
+        merged_metrics = jax_utils.unreplicate(state.metrics)
+        merged_metrics = jax.device_get(merged_metrics.compute())
+        for metric, value in merged_metrics.items():
             metrics_history[f"val_{metric}"].append(value)
 
         print(
@@ -537,7 +539,7 @@ for batch in train_ds:
             step=(step + 1) // num_steps_per_epoch,
         )
 
-        ckpt["model"] = jax.device_get(val_state)
+        ckpt["model"] = jax.device_get(jax_utils.unreplicate(state))
         ckpt["metrics_history"] = metrics_history
         save_args = orbax_utils.save_args_from_target(ckpt)
         checkpoint_manager.save(
@@ -547,7 +549,10 @@ for batch in train_ds:
             metrics={"val_loss": float(metrics_history["val_loss"][-1])},
         )
 
-        del val_state
+        # reset train_metrics for next training epoch
+        empty_metrics = state.metrics.empty()
+        empty_metrics = jax_utils.replicate(empty_metrics)
+        state = state.replace(metrics=empty_metrics)
 
         epochs += 1
         if epochs == num_epochs:
