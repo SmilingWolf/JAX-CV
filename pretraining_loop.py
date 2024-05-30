@@ -549,7 +549,7 @@ for batch in train_ds:
                 "train_loss": metrics_history["train_loss"][-1],
                 "val_loss": metrics_history["val_loss"][-1],
             },
-            step=(step + 1) // num_steps_per_epoch,
+            step=step // num_steps_per_epoch,
         )
 
         if args.checkpoints_keep > 0:
