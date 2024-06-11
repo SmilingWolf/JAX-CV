@@ -649,6 +649,7 @@ for batch in train_ds:
                 "val_mcc": metrics_history["val_mcc"][-1] * 100,
             },
             step=(step + 1) // num_steps_per_epoch,
+            commit=True,
         )
 
         if args.checkpoints_keep > 0:
