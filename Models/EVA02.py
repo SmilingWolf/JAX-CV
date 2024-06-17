@@ -402,6 +402,20 @@ class EVA02Transformer(linen.Module):
             action="store_false",
         )
         parser.set_defaults(use_norm_bias=self.use_norm_bias)
+
+        parser.add_argument(
+            "--enable-mlp-ln",
+            dest="scale_mlp",
+            help="Enable norm layer in SwiGLU block",
+            action="store_true",
+        )
+        parser.add_argument(
+            "--disable-mlp-ln",
+            dest="scale_mlp",
+            help="Disable norm layer in SwiGLU block",
+            action="store_false",
+        )
+        parser.set_defaults(scale_mlp=self.scale_mlp)
         return parser
 
     @staticmethod
