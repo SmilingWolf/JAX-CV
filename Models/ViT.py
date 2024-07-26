@@ -8,6 +8,40 @@ import numpy as np
 from flax import linen
 
 
+class LayerNorm(linen.Module):
+    epsilon: float = 1e-6
+    use_bias: bool = True
+    force_float32_reductions: bool = True
+
+    dtype: jt.DTypeLike = jnp.float32
+
+    @linen.compact
+    def __call__(self, x):
+        scale = self.param("scale", linen.initializers.zeros_init(), (x.shape[-1]))
+
+        dtype = self.dtype
+        if self.force_float32_reductions:
+            dtype = jnp.promote_types(dtype, jnp.float32)
+        x = x.astype(dtype)
+
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+
+        var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
+        var = jnp.maximum(0.0, var - jnp.square(mean))
+        mul = jnp.reciprocal(jnp.sqrt(var + self.epsilon))
+
+        centered_inputs = x - mean
+        normed_inputs = centered_inputs * mul
+
+        scale = jnp.expand_dims(scale, axis=range(len(x.shape) - 1))
+        normed_inputs = normed_inputs * (1 + scale)
+        if self.use_bias:
+            bias = self.param("bias", linen.initializers.zeros_init(), (x.shape[-1]))
+            bias = jnp.expand_dims(bias, axis=range(len(x.shape) - 1))
+            normed_inputs = normed_inputs + bias
+        return normed_inputs.astype(self.dtype)
+
+
 class Attention(linen.Module):
     dim: int
     num_heads: int
@@ -145,6 +179,13 @@ class VisionTransformerBlock(linen.Module):
         return x
 
 
+def make_norm_layer(layer_name):
+    if layer_name == "reparam_layernorm":
+        return LayerNorm
+    elif layer_name == "linen_layernorm":
+        return linen.LayerNorm
+
+
 class VisionTransformer(linen.Module):
     patch_size: int = 16
     num_classes: int = 1000
@@ -156,14 +197,15 @@ class VisionTransformer(linen.Module):
 
     drop_path_rate: float = 0.1
 
-    norm_layer: Callable = linen.LayerNorm
+    norm_layer: str = "linen_layernorm"
 
     layer_norm_eps: float = 1e-5
     dtype: jt.DTypeLike = jnp.float32
 
     def setup(self):
+        norm_layer = make_norm_layer(self.norm_layer)
         norm_layer = partial(
-            self.norm_layer,
+            norm_layer,
             epsilon=self.layer_norm_eps,
             dtype=self.dtype,
         )
@@ -226,6 +268,13 @@ class VisionTransformer(linen.Module):
             help="Stochastic depth rate",
             type=float,
         )
+
+        parser.add_argument(
+            "--norm-layer",
+            default=self.norm_layer,
+            help="Normalization layer",
+            type=str,
+        )
         return parser
 
     @staticmethod
@@ -238,7 +287,9 @@ class VisionTransformer(linen.Module):
 
     def should_decay(self, path, _):
         is_kernel = path[-1].key == "kernel"
-        verdict = is_kernel
+        is_scale = path[-1].key == "scale"
+        is_scale = is_scale and self.norm_layer == "reparam_layernorm"
+        verdict = is_kernel or is_scale
         return verdict
 
 
