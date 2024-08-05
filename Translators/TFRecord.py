@@ -65,7 +65,6 @@ def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
             index_to_label[index] = label
 
     # Collect new labels and update mapping
-    num_samples = 0
     new_labels = set()
 
     for label_file in label_files:
@@ -123,6 +122,7 @@ def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
         image = image.convert("RGB")
         image = image.resize((img_size, img_size), Image.LANCZOS)
         image_np = np.array(image)
+
         # Convert RGB to BGR
         image_np = image_np[..., ::-1]
 
@@ -193,7 +193,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Use dataset folder as output  if empty
+    # Use dataset folder as output if empty
     if args.output_path is None:
         args.output_path = args.dataset_folder
 
