@@ -34,8 +34,8 @@ def save_label_mapping(label_mapping_filename, label_to_index):
 def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
     """Create a TFRecord file from images and label files and generate dataset JSON file."""
     dataset_name = os.path.basename(os.path.normpath(dataset_folder))
-    train_writer = tf.io.TFRecordWriter(output_path + '/record_shards_train/' + dataset_name + '_train.tfrecord')
-    val_writer = tf.io.TFRecordWriter(output_path + '/record_shards_val/' + dataset_name + '_val.tfrecord')
+    train_writer = tf.io.TFRecordWriter(f'{output_path}/record_shards_train/{dataset_name}_train.tfrecord')
+    val_writer = tf.io.TFRecordWriter(f'{output_path}/record_shards_val/{dataset_name}_val.tfrecord')
     
     image_files = [f for f in os.listdir(dataset_folder) if f.lower().endswith(('png', 'jpg', 'jpeg'))]
     label_files = [f for f in os.listdir(dataset_folder) if f.lower().endswith('txt')]
@@ -47,7 +47,7 @@ def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
     image_file_set = set(os.path.splitext(f)[0].lower() for f in image_files)
     
     # Load existing label mapping
-    label_mapping_filename = output_path + '/' + dataset_name + '_labels.json'
+    label_mapping_filename = f'{output_path}/{dataset_name}_labels.json'
     label_to_index, mapping_exists = load_existing_labels(label_mapping_filename)
     index_to_label = [None] * (len(label_to_index) + 1)
 
@@ -95,7 +95,7 @@ def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
 
     for idx, image_file in enumerate(image_files):
         image_name = os.path.splitext(image_file)[0].lower()
-        label_file = image_name + '.txt'
+        label_file = f'{image_name}.txt'
         label_path = os.path.join(dataset_folder, label_file)
         
         # Check if there's a corresponding label file
@@ -145,21 +145,21 @@ def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
         "val_samples": num_val_samples
     }
 
-    json_filename = output_path + '/' + dataset_name + '.json'
+    json_filename = f'{output_path}/{dataset_name}.json'
     with open(json_filename, 'w') as json_file:
         json.dump(dataset_info, json_file, indent=4)
         
     # Save updated label to index mapping
     save_label_mapping(label_mapping_filename, label_to_index)
 
-    print(f"TFRecord files saved to {output_path}/record_shards_train and {output_path}/record_shards_val.")
-    print(f"Dataset JSON file saved to {json_filename}.")
+    print(f"TFRecord files saved to {output_path}/record_shards_train and {output_path}/record_shards_val")
+    print(f"Dataset JSON file saved to {json_filename}")
     print(f"Label mapping JSON file saved to {label_mapping_filename}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Create TFRecord file from images and label files.')
+    parser = argparse.ArgumentParser(description='Create TFRecord file from images and label files')
     parser.add_argument('--dataset_folder', type=str, help='Path to dataset folder containing both images and labels')
-    parser.add_argument('--output_path', type=str, help='Path to output files. Will place TFRecords into "record_shards_train" and "record_shards_val" folders.')
+    parser.add_argument('--output_path', type=str, help='Path to output files. Will place TFRecords into "record_shards_train" and "record_shards_val" folders')
     parser.add_argument('--split_ratio', type=float, default=0.7, help='Ratio of training to total samples (default: 0.7)')
     parser.add_argument('--img_size', type=int, default=512, help='Image size to resize all images to (default: 512)')
 
