@@ -4,7 +4,7 @@ import os
 
 import numpy as np
 import tensorflow as tf
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def _bytes_feature(value):
@@ -34,6 +34,30 @@ def save_label_mapping(label_mapping_filename, label_to_index):
     """Save label to index mapping to a file."""
     with open(label_mapping_filename, "w") as mapping_file:
         json.dump(label_to_index, mapping_file, indent=4)
+
+
+def prepare_image(image_path, target_size):
+    """Handle EXIF orientation, colorpsace, alpha, resizing"""
+    image = Image.open(image_path)
+    image = ImageOps.exif_transpose(image)
+    image = image.convert(mode="RGBA")
+
+    canvas = Image.new("RGBA", image.size, (255, 255, 255))
+    canvas.alpha_composite(image)
+    image = canvas.convert("RGB")
+
+    # Pad image to square
+    max_dim = max(image.size)
+    pad_left = (max_dim - image.size[0]) // 2
+    pad_top = (max_dim - image.size[1]) // 2
+
+    padded_image = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
+    padded_image.paste(image, (pad_left, pad_top))
+
+    # Resize
+    if max_dim != target_size:
+        padded_image = padded_image.resize((target_size, target_size), Image.LANCZOS)
+    return padded_image
 
 
 def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
@@ -118,13 +142,8 @@ def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
 
         # Read image
         image_path = os.path.join(dataset_folder, image_file)
-        image = Image.open(image_path)
-        image = image.convert("RGB")
-        image = image.resize((img_size, img_size), Image.LANCZOS)
+        image = prepare_image(image_path, img_size)
         image_np = np.array(image)
-
-        # Convert RGB to BGR
-        image_np = image_np[..., ::-1]
 
         image_id = hash(image_name) % 2**63
 
