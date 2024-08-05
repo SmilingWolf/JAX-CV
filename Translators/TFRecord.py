@@ -1,10 +1,11 @@
-import os
-import tensorflow as tf
-from PIL import Image
-import numpy as np
-import io
 import argparse
 import json
+import os
+
+import numpy as np
+import tensorflow as tf
+from PIL import Image
+
 
 def _bytes_feature(value):
     """Returns a bytes_list from a string / byte."""
