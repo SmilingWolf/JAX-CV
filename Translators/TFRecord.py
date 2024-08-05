@@ -30,7 +30,7 @@ def save_label_mapping(label_mapping_filename, label_to_index):
     with open(label_mapping_filename, 'w') as mapping_file:
         json.dump(label_to_index, mapping_file, indent=4)
 
-def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=448):
+def create_tfrecord(dataset_folder, output_path, split_ratio=0.7, img_size=512):
     """Create a TFRecord file from images and label files and generate dataset JSON file."""
     dataset_name = os.path.basename(os.path.normpath(dataset_folder))
     train_writer = tf.io.TFRecordWriter(output_path + '/record_shards_train/' + dataset_name + '_train.tfrecord')
@@ -160,7 +160,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset_folder', type=str, help='Path to dataset folder containing both images and labels')
     parser.add_argument('--output_path', type=str, help='Path to output files. Will place TFRecords into "record_shards_train" and "record_shards_val" folders.')
     parser.add_argument('--split_ratio', type=float, default=0.7, help='Ratio of training to total samples (default: 0.7)')
-    parser.add_argument('--img_size', type=int, default=448, help='Image size to resize all images to (default: 448)')
+    parser.add_argument('--img_size', type=int, default=512, help='Image size to resize all images to (default: 512)')
 
     args = parser.parse_args()
 
