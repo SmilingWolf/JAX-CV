@@ -18,6 +18,7 @@ from .SimMIM import (
     simmim_vit_small,
 )
 from .SwinV2 import swinv2_base, swinv2_large, swinv2_tiny
+from .VGG import vgg11, vgg13, vgg19
 from .ViT import vit_base, vit_large, vit_small
 
 model_registry = {
@@ -36,6 +37,9 @@ model_registry = {
     "convnext_tiny": convnext_tiny,
     "convnext_small": convnext_small,
     "convnext_base": convnext_base,
+    "vgg11": vgg11,
+    "vgg13": vgg13,
+    "vgg19": vgg19,
     "simmim_swinv2_tiny": simmim_swinv2_tiny,
     "simmim_swinv2_base": simmim_swinv2_base,
     "simmim_swinv2_large": simmim_swinv2_large,
