@@ -114,6 +114,8 @@ class VisionRotaryEmbeddingFast(linen.Module):
 
 
 class Attention(linen.Module):
+    num_extra_tokens: int
+
     dim: int
     num_heads: int
 
@@ -142,15 +144,15 @@ class Attention(linen.Module):
 
         q, k, v = (qkv[0], qkv[1], qkv[2])
 
-        q_cls = q[:, :, :1, :]
-        q_seq = q[:, :, 1:, :]
+        q_xtr = q[:, :, : self.num_extra_tokens, :]
+        q_seq = q[:, :, self.num_extra_tokens :, :]
         q_seq = self.rope(q_seq).astype(v.dtype)
-        q = jnp.concatenate([q_cls, q_seq], axis=2)
+        q = jnp.concatenate([q_xtr, q_seq], axis=2)
 
-        k_cls = k[:, :, :1, :]
-        k_seq = k[:, :, 1:, :]
+        k_xtr = k[:, :, : self.num_extra_tokens, :]
+        k_seq = k[:, :, self.num_extra_tokens :, :]
         k_seq = self.rope(k_seq).astype(v.dtype)
-        k = jnp.concatenate([k_cls, k_seq], axis=2)
+        k = jnp.concatenate([k_xtr, k_seq], axis=2)
 
         q = q / jnp.sqrt(q.shape[-1]).astype(q.dtype)
         attn = q @ jnp.transpose(k, (0, 1, 3, 2))
@@ -249,6 +251,8 @@ class PatchEmbed(linen.Module):
 
 
 class EVA02TransformerBlock(linen.Module):
+    num_extra_tokens: int
+
     mlp_dim: int
     num_heads: int
     drop_path_ratio: float
@@ -268,6 +272,7 @@ class EVA02TransformerBlock(linen.Module):
 
         x = self.norm_layer()(x)
         x = Attention(
+            num_extra_tokens=self.num_extra_tokens,
             dim=x.shape[-1],
             num_heads=self.num_heads,
             rope=self.rope,
@@ -310,6 +315,9 @@ class EVA02Transformer(linen.Module):
     patch_size: int = 16
     num_classes: int = 1000
 
+    use_cls_token: bool = True
+    num_register_tokens: int = 0
+
     num_layers: int = 12
     embed_dim: int = 768
     mlp_dim: int = 3072
@@ -343,8 +351,23 @@ class EVA02Transformer(linen.Module):
             dtype=self.dtype,
         )
 
-        cls_token_init = linen.initializers.truncated_normal(stddev=0.02)
-        self.cls_token = self.param("cls_token", cls_token_init, (1, 1, self.embed_dim))
+        if self.use_cls_token:
+            cls_token_init = linen.initializers.truncated_normal(stddev=0.02)
+            self.cls_token = self.param(
+                "cls_token",
+                cls_token_init,
+                (1, 1, self.embed_dim),
+            )
+
+        if self.num_register_tokens:
+            reg_token_init = linen.initializers.truncated_normal(stddev=0.02)
+            self.reg_token = self.param(
+                "reg_token",
+                reg_token_init,
+                (1, self.num_register_tokens, self.embed_dim),
+            )
+
+        self.num_extra_tokens = int(self.use_cls_token) + self.num_register_tokens
 
         self.pos_emb = PosEmbed(dtype=self.dtype)
 
@@ -360,6 +383,7 @@ class EVA02Transformer(linen.Module):
         eva02_body = []
         for i_layer in range(self.num_layers):
             layer = EVA02TransformerBlock(
+                num_extra_tokens=self.num_extra_tokens,
                 mlp_dim=self.mlp_dim,
                 num_heads=self.num_heads,
                 scale_mlp=self.scale_mlp,
@@ -386,17 +410,24 @@ class EVA02Transformer(linen.Module):
     def __call__(self, x, train: bool = False):
         x = self.patch_embed(x)
 
-        B, N, C = x.shape
-        b_cls = self.cls_token.astype(x.dtype)
-        b_cls = jnp.broadcast_to(b_cls, (B, 1, C))
-        x = jnp.concatenate([b_cls, x], axis=1)
+        if self.use_cls_token:
+            B, N, C = x.shape
+            b_cls = self.cls_token.astype(x.dtype)
+            b_cls = jnp.broadcast_to(b_cls, (B, 1, C))
+            x = jnp.concatenate([b_cls, x], axis=1)
 
         x = self.pos_emb(x)
+
+        if self.num_register_tokens:
+            B, N, C = x.shape
+            b_reg = self.reg_token.astype(x.dtype)
+            b_reg = jnp.broadcast_to(b_reg, (B, self.num_register_tokens, C))
+            x = jnp.concatenate([b_reg, x], axis=1)
 
         for layer in self.eva02_body:
             x = layer(x, train=train)
 
-        x = x[:, 1:]
+        x = x[:, self.num_extra_tokens :]
         x = jnp.mean(x, axis=(1,))
         x = self.norm(x)
         x = self.head(x)
@@ -464,6 +495,27 @@ class EVA02Transformer(linen.Module):
             default=self.norm_layer,
             help="Normalization layer",
             type=str,
+        )
+
+        parser.add_argument(
+            "--enable-cls-token",
+            dest="use_cls_token",
+            help="Enable cls token",
+            action="store_true",
+        )
+        parser.add_argument(
+            "--disable-cls-token",
+            dest="use_cls_token",
+            help="Disable cls token",
+            action="store_false",
+        )
+        parser.set_defaults(use_cls_token=self.use_cls_token)
+
+        parser.add_argument(
+            "--num-register-tokens",
+            default=self.num_register_tokens,
+            help="Number of registers (arXiv:2309.16588)",
+            type=int,
         )
         return parser
 

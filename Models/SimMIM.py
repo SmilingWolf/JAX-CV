@@ -215,17 +215,25 @@ class EVA02ForSimMIM(EVA02Transformer):
         mask = jnp.reshape(mask, (B, L, 1)).astype(mask_tokens.dtype)
         x = x * (1.0 - mask) + mask_tokens * mask
 
-        B, L, C = x.shape
-        b_cls = jnp.broadcast_to(self.cls_token, (B, 1, C))
-        x = jnp.concatenate([b_cls, x], axis=1)
+        if self.use_cls_token:
+            B, L, C = x.shape
+            b_cls = self.cls_token.astype(x.dtype)
+            b_cls = jnp.broadcast_to(b_cls, (B, 1, C))
+            x = jnp.concatenate([b_cls, x], axis=1)
 
         x = self.pos_emb(x)
+
+        if self.num_register_tokens:
+            B, L, C = x.shape
+            b_reg = self.reg_token.astype(x.dtype)
+            b_reg = jnp.broadcast_to(b_reg, (B, self.num_register_tokens, C))
+            x = jnp.concatenate([b_reg, x], axis=1)
 
         for layer in self.eva02_body:
             x = layer(x, train=train)
 
         x = self.norm(x)
-        x = x[:, 1:]
+        x = x[:, self.num_extra_tokens :]
 
         B, L, C = x.shape
         H = W = int(L**0.5)
