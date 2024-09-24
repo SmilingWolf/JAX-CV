@@ -315,6 +315,7 @@ class EVA02Transformer(linen.Module):
     patch_size: int = 16
     num_classes: int = 1000
 
+    use_pos_emb: bool = True
     use_cls_token: bool = True
     num_register_tokens: int = 0
 
@@ -369,7 +370,7 @@ class EVA02Transformer(linen.Module):
 
         self.num_extra_tokens = int(self.use_cls_token) + self.num_register_tokens
 
-        self.pos_emb = PosEmbed(dtype=self.dtype)
+        self.pos_emb = PosEmbed(dtype=self.dtype) if self.use_pos_emb else lambda x: x
 
         half_head_dim = self.embed_dim // self.num_heads // 2
         hw_seq_len = self.image_size // self.patch_size
@@ -496,6 +497,20 @@ class EVA02Transformer(linen.Module):
             help="Normalization layer",
             type=str,
         )
+
+        parser.add_argument(
+            "--enable-pos-emb",
+            dest="use_pos_emb",
+            help="Enable (learned) absolute positional embeddings",
+            action="store_true",
+        )
+        parser.add_argument(
+            "--disable-pos-emb",
+            dest="use_pos_emb",
+            help="Disable (learned) absolute positional embeddings",
+            action="store_false",
+        )
+        parser.set_defaults(use_pos_emb=self.use_pos_emb)
 
         parser.add_argument(
             "--enable-cls-token",
