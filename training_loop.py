@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import orbax.checkpoint
 import tensorflow as tf
 import wandb
 from clu import metrics
@@ -569,6 +570,23 @@ metrics_history = {
 }
 ckpt = {"model": state, "metrics_history": metrics_history}
 
+options_dict = dict(
+    max_to_keep=args.checkpoints_keep,
+    best_fn=lambda metrics: metrics["val_loss"],
+    best_mode="min",
+)
+if args.checkpoints_keep == -1:
+    options_dict = dict(max_to_keep=1)
+
+options = orbax.checkpoint.CheckpointManagerOptions(
+    **options_dict,
+    create=True,
+)
+checkpoint_manager = orbax.checkpoint.CheckpointManager(
+    f"{checkpoints_root}/{run_name}",
+    options=options,
+)
+
 if loss_weights_file:
     label_weights = np.load(loss_weights_file, allow_pickle=False)
 else:
@@ -663,6 +681,16 @@ for batch in train_ds:
             step=(step + 1) // num_steps_per_epoch,
             commit=True,
         )
+
+        if args.checkpoints_keep > 0:
+            ckpt["model"] = jax.device_get(state)
+            ckpt["metrics_history"] = metrics_history
+            checkpoint_manager.save(
+                epochs,
+                args=orbax.checkpoint.args.StandardSave(ckpt),
+                metrics={"val_loss": float(metrics_history["val_loss"][-1])},
+            )
+            checkpoint_manager.wait_until_finished()
 
         # reset train_metrics for next training epoch
         metrics = bv_utils.reshard(metrics.empty(), repl_sharding)
