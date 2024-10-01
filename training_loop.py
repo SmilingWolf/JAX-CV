@@ -1,6 +1,7 @@
 import argparse
 import json
 from datetime import datetime
+from functools import partial
 from typing import Any, Callable, Union
 
 import flax
@@ -8,15 +9,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import orbax.checkpoint
 import tensorflow as tf
 import wandb
 from clu import metrics
-from flax import jax_utils
-from flax.training import orbax_utils, train_state
+from flax.training import train_state
+from jax.experimental import mesh_utils
 from tqdm import tqdm
 
 import Models
+from BigVision import sharding as bv_sharding
+from BigVision import utils as bv_utils
 from Generators.WDTaggerGen import DataGenerator
 from Metrics.ConfusionMatrix import f1score, mcc
 
@@ -29,8 +31,25 @@ class Metrics(metrics.Collection):
 
 
 class TrainState(train_state.TrainState):
-    metrics: Metrics
     constants: Any
+
+
+def create_metrics_state(num_classes: int):
+    loss = metrics.Average.from_output("loss")
+    f1score_metric = f1score(
+        threshold=0.4,
+        averaging="macro",
+        num_classes=num_classes,
+        from_logits=True,
+    )
+    mcc_metric = mcc(
+        threshold=0.4,
+        averaging="macro",
+        num_classes=num_classes,
+        from_logits=True,
+    )
+    collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
+    return collection.empty()
 
 
 def create_optimizer_tx(
@@ -64,8 +83,7 @@ def create_optimizer_tx(
 def create_train_state(
     module,
     params_key,
-    target_size: int,
-    num_classes: int,
+    target_shape: tuple[int],
     learning_rate: Union[float, Callable],
     optimizer_eps: float,
     grad_clip: float,
@@ -76,27 +94,12 @@ def create_train_state(
     # initialize parameters by passing a template image
     variables = module.init(
         params_key,
-        jnp.ones([1, target_size, target_size, 3]),
+        jnp.ones(target_shape),
         train=False,
     )
     params = variables["params"]
     del variables["params"]
     constants = variables
-
-    loss = metrics.Average.from_output("loss")
-    f1score_metric = f1score(
-        threshold=0.4,
-        averaging="macro",
-        num_classes=num_classes,
-        from_logits=True,
-    )
-    mcc_metric = mcc(
-        threshold=0.4,
-        averaging="macro",
-        num_classes=num_classes,
-        from_logits=True,
-    )
-    collection = Metrics.create(loss=loss, f1score=f1score_metric, mcc=mcc_metric)
 
     tx = create_optimizer_tx(
         module,
@@ -112,14 +115,14 @@ def create_train_state(
         apply_fn=module.apply,
         params=params,
         tx=tx,
-        metrics=collection.empty(),
         constants=constants,
     )
 
 
-def train_step(state, batch, weights, dropout_key):
+def train_step(state, batch, weights, dropout_key, metrics):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
+    _, dropout_train_key = jax.random.split(dropout_train_key, 2)
 
     def loss_fn(params, weights, **kwargs):
         logits = state.apply_fn(
@@ -135,20 +138,18 @@ def train_step(state, batch, weights, dropout_key):
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, logits), grads = grad_fn(state.params, weights, **state.constants)
-    grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
-    metric_updates = state.metrics.gather_from_model_output(
+    metric_updates = metrics.single_from_model_output(
         logits=logits,
         labels=batch["labels"],
         loss=loss,
     )
-    metrics = state.metrics.merge(metric_updates)
-    state = state.replace(metrics=metrics)
-    return state
+    metrics = metrics.merge(metric_updates)
+    return state, metrics
 
 
-def eval_step(*, state, batch):
+def eval_step(state, batch, metrics):
     logits = state.apply_fn(
         {"params": state.params, **state.constants},
         batch["images"],
@@ -157,14 +158,13 @@ def eval_step(*, state, batch):
 
     loss = optax.sigmoid_binary_cross_entropy(logits=logits, labels=batch["labels"])
     loss = loss.sum() / batch["labels"].shape[0]
-    metric_updates = state.metrics.gather_from_model_output(
+    metric_updates = metrics.single_from_model_output(
         logits=logits,
         labels=batch["labels"],
         loss=loss,
     )
-    metrics = state.metrics.merge(metric_updates)
-    state = state.replace(metrics=metrics)
-    return state
+    metrics = metrics.merge(metric_updates)
+    return metrics
 
 
 model_parser = argparse.ArgumentParser(
@@ -351,7 +351,6 @@ num_epochs = args.epochs
 warmup_epochs = args.warmup_epochs
 batch_size = args.batch_size
 compute_units = jax.device_count()
-global_batch_size = batch_size * compute_units
 restore_params_ckpt = args.restore_params_ckpt
 restore_simmim_ckpt = args.restore_simmim_ckpt
 
@@ -388,7 +387,6 @@ train_config["num_epochs"] = num_epochs
 train_config["warmup_epochs"] = warmup_epochs
 train_config["batch_size"] = batch_size
 train_config["compute_units"] = compute_units
-train_config["global_batch_size"] = global_batch_size
 train_config["image_size"] = image_size
 train_config["num_classes"] = num_classes
 train_config["train_samples"] = train_samples
@@ -439,18 +437,54 @@ if args.wandb_run_id:
 
 wandb.init(**wandb_args)
 
+configs = {
+    "replicate": {
+        "mesh": [("data", -1)],
+        "sharding_rules": [("act_batch", "data")],
+        "strategy": [(".*", "replicate")],
+    },
+    "fsdp": {
+        "mesh": [("data", -1)],
+        "sharding_rules": [("act_batch", ("data",))],
+        "strategy": [
+            (
+                "(^params.*|^opt_state.*|^constants.*)",
+                'fsdp(axis="data")',
+            )
+        ],
+    },
+}
+config = configs["fsdp"]
+
+config_mesh = config["mesh"]
+sharding_rules = config["sharding_rules"]
+strategy = config["strategy"]
+
+mesh_axes, mesh_size = tuple(zip(*config_mesh))
+mesh_size = np.array(jax.devices()).reshape(mesh_size).shape
+device_mesh = mesh_utils.create_device_mesh(mesh_size, allow_split_physical_axes=False)
+
+mesh = jax.sharding.Mesh(device_mesh, mesh_axes)
+
+repl_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+batch_data_sharding = jax.sharding.NamedSharding(
+    mesh,
+    jax.sharding.PartitionSpec("data"),
+)
+
 tf.random.set_seed(0)
 root_key = jax.random.key(0)
 params_key, dropout_key = jax.random.split(key=root_key, num=2)
-dropout_keys = jax.random.split(key=dropout_key, num=jax.device_count())
-del root_key, dropout_key
+params_key = bv_utils.reshard(params_key, repl_sharding)
+dropout_key = bv_utils.reshard(dropout_key, repl_sharding)
+del root_key
 
 training_generator = DataGenerator(
     f"{dataset_root}/record_shards_train/*",
     num_classes=num_classes,
     image_size=image_size,
     batch_size=batch_size,
-    num_devices=compute_units,
+    num_devices=0,
     noise_level=noise_level,
     mixup_alpha=mixup_alpha,
     rotation_ratio=rotation_ratio,
@@ -459,14 +493,14 @@ training_generator = DataGenerator(
     random_resize_method=random_resize_method,
 )
 train_ds = training_generator.genDS()
-train_ds = jax_utils.prefetch_to_device(train_ds.as_numpy_iterator(), size=2)
+train_ds = train_ds.as_numpy_iterator()
 
 validation_generator = DataGenerator(
     f"{dataset_root}/record_shards_val/*",
     num_classes=num_classes,
     image_size=image_size,
     batch_size=batch_size,
-    num_devices=compute_units,
+    num_devices=0,
     noise_level=0,
     mixup_alpha=0.0,
     rotation_ratio=0.0,
@@ -474,7 +508,7 @@ validation_generator = DataGenerator(
     random_resize_method=False,
 )
 val_ds = validation_generator.genDS()
-val_ds = jax_utils.prefetch_to_device(val_ds.as_numpy_iterator(), size=2)
+val_ds = val_ds.as_numpy_iterator()
 
 model = model_builder.build(
     config=model_builder,
@@ -487,7 +521,7 @@ model = model_builder.build(
 # tab_img = jnp.ones([1, image_size, image_size, 3])
 # print(model.tabulate(jax.random.key(0), tab_img, train=False))
 
-num_steps_per_epoch = train_samples // global_batch_size
+num_steps_per_epoch = train_samples // batch_size
 learning_rate = optax.warmup_cosine_decay_schedule(
     init_value=learning_rate * 0.1,
     peak_value=learning_rate,
@@ -496,18 +530,34 @@ learning_rate = optax.warmup_cosine_decay_schedule(
     end_value=learning_rate * 0.01,
 )
 
-state = create_train_state(
-    model,
-    params_key,
-    image_size,
-    num_classes,
-    learning_rate,
-    optimizer_eps,
-    grad_clip,
-    weight_decay,
-    freeze_model_body,
+target_shape = (batch_size, image_size, image_size, 3)
+create_train_state = partial(
+    create_train_state,
+    module=model,
+    target_shape=target_shape,
+    optimizer_eps=optimizer_eps,
+    grad_clip=grad_clip,
+    weight_decay=weight_decay,
+    freeze_model_body=freeze_model_body,
+    learning_rate=learning_rate,
+)
+train_state_shape = jax.eval_shape(create_train_state, params_key=params_key)
+
+with flax.linen.logical_axis_rules(sharding_rules):
+    train_state_sharding = bv_sharding.infer_sharding(
+        train_state_shape,
+        strategy=strategy,
+        mesh=mesh,
+    )
+
+# Parameters and the optimizer are now global (distributed) jax arrays.
+state = jax.jit(create_train_state, out_shardings=train_state_sharding)(
+    params_key=params_key
 )
 del params_key
+
+metrics = create_metrics_state(num_classes=num_classes)
+metrics = bv_utils.reshard(metrics, repl_sharding)
 
 metrics_history = {
     "train_loss": [],
@@ -519,83 +569,50 @@ metrics_history = {
 }
 ckpt = {"model": state, "metrics_history": metrics_history}
 
-options_dict = dict(
-    max_to_keep=args.checkpoints_keep,
-    best_fn=lambda metrics: metrics["val_loss"],
-    best_mode="min",
-)
-if args.checkpoints_keep == -1:
-    options_dict = dict(max_to_keep=1)
-
-orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-options = orbax.checkpoint.CheckpointManagerOptions(
-    **options_dict,
-    create=True,
-)
-checkpoint_manager = orbax.checkpoint.CheckpointManager(
-    f"{checkpoints_root}/{run_name}",
-    orbax_checkpointer,
-    options,
-)
-
-if restore_params_ckpt or restore_simmim_ckpt:
-    ckpt_path = restore_params_ckpt if restore_params_ckpt else restore_simmim_ckpt
-
-    throwaway_manager = orbax.checkpoint.CheckpointManager(
-        ckpt_path,
-        orbax_checkpointer,
-    )
-    latest_epoch = throwaway_manager.latest_step()
-    restored = throwaway_manager.restore(latest_epoch)
-
-    transforms = {}
-    if restore_simmim_ckpt:
-        tx_pairs = model.get_simmim_orbax_txs()
-        for tx_regex, tx_action in tx_pairs:
-            tx_action = orbax.checkpoint.Transform(original_key=tx_action)
-            transforms[tx_regex] = tx_action
-
-    restored = orbax.checkpoint.apply_transformations(restored, transforms, ckpt)
-
-    state = state.replace(params=restored["model"].params)
-    del throwaway_manager
-
-latest_epoch = checkpoint_manager.latest_step()
-if latest_epoch is not None:
-    restored = checkpoint_manager.restore(latest_epoch, items=ckpt)
-    state = restored["model"]
-    metrics_history = restored["metrics_history"]
-    state = state.replace(metrics=state.metrics.empty())
-else:
-    latest_epoch = 0
-
-# TODO: maybe the weights should be included in the TrainState?
 if loss_weights_file:
     label_weights = np.load(loss_weights_file, allow_pickle=False)
 else:
     label_weights = np.array([1.0]).astype(np.float32)
-label_weights = jax_utils.replicate(label_weights)
+label_weights = bv_utils.reshard(label_weights, repl_sharding)
+
+jit_train_step = jax.jit(
+    train_step,
+    in_shardings=(
+        train_state_sharding,
+        batch_data_sharding,
+        repl_sharding,
+        repl_sharding,
+        repl_sharding,
+    ),
+    out_shardings=(train_state_sharding, repl_sharding),
+)
+
+jit_eval_step = jax.jit(
+    eval_step,
+    in_shardings=(
+        train_state_sharding,
+        batch_data_sharding,
+        repl_sharding,
+    ),
+    out_shardings=(repl_sharding),
+)
 
 step = int(state.step)
-state = jax_utils.replicate(state)
-p_train_step = jax.pmap(train_step, axis_name="batch")
-p_eval_step = jax.pmap(eval_step, axis_name="batch")
-
 epochs = step // num_steps_per_epoch
 pbar = tqdm(total=num_steps_per_epoch)
 for batch in train_ds:
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
-    state = p_train_step(
-        state=state,
-        batch=batch,
-        weights=label_weights,
-        dropout_key=dropout_keys,
+    state, metrics = jit_train_step(
+        state,
+        batch,
+        label_weights,
+        dropout_key,
+        metrics,
     )
 
     if step % 224 == 0:
-        merged_metrics = jax_utils.unreplicate(state.metrics)
-        merged_metrics = jax.device_get(merged_metrics.loss.compute())
+        merged_metrics = jax.device_get(metrics.loss.compute())
         pbar.set_postfix(loss=f"{merged_metrics:.04f}")
 
     pbar.update(1)
@@ -603,25 +620,20 @@ for batch in train_ds:
     # one training epoch has passed
     if (step + 1) % num_steps_per_epoch == 0:
         # compute metrics
-        merged_metrics = jax_utils.unreplicate(state.metrics)
-        merged_metrics = jax.device_get(merged_metrics.compute())
+        merged_metrics = jax.device_get(metrics.compute())
         for metric, value in merged_metrics.items():
-            # record metrics
             metrics_history[f"train_{metric}"].append(value)
 
         # reset train_metrics for validation
-        empty_metrics = state.metrics.empty()
-        empty_metrics = jax_utils.replicate(empty_metrics)
-        state = state.replace(metrics=empty_metrics)
+        metrics = bv_utils.reshard(metrics.empty(), repl_sharding)
 
         # Compute metrics on the validation set after each training epoch
         for val_step, val_batch in enumerate(val_ds):
-            state = p_eval_step(state=state, batch=val_batch)
-            if val_step == val_samples // global_batch_size:
+            metrics = jit_eval_step(state, val_batch, metrics)
+            if val_step + 1 == val_samples // batch_size:
                 break
 
-        merged_metrics = jax_utils.unreplicate(state.metrics)
-        merged_metrics = jax.device_get(merged_metrics.compute())
+        merged_metrics = jax.device_get(metrics.compute())
         for metric, value in merged_metrics.items():
             metrics_history[f"val_{metric}"].append(value)
 
@@ -652,21 +664,8 @@ for batch in train_ds:
             commit=True,
         )
 
-        if args.checkpoints_keep > 0:
-            ckpt["model"] = jax.device_get(jax_utils.unreplicate(state))
-            ckpt["metrics_history"] = metrics_history
-            save_args = orbax_utils.save_args_from_target(ckpt)
-            checkpoint_manager.save(
-                epochs,
-                ckpt,
-                save_kwargs={"save_args": save_args},
-                metrics={"val_loss": float(metrics_history["val_loss"][-1])},
-            )
-
         # reset train_metrics for next training epoch
-        empty_metrics = state.metrics.empty()
-        empty_metrics = jax_utils.replicate(empty_metrics)
-        state = state.replace(metrics=empty_metrics)
+        metrics = bv_utils.reshard(metrics.empty(), repl_sharding)
 
         epochs += 1
         if epochs == num_epochs:
