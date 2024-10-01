@@ -13,7 +13,7 @@ import orbax.checkpoint
 import tensorflow as tf
 import wandb
 from clu import metrics
-from flax.training import train_state
+from flax.training import orbax_utils, train_state
 from jax.experimental import mesh_utils
 from tqdm import tqdm
 
@@ -578,14 +578,47 @@ options_dict = dict(
 if args.checkpoints_keep == -1:
     options_dict = dict(max_to_keep=1)
 
+orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 options = orbax.checkpoint.CheckpointManagerOptions(
     **options_dict,
     create=True,
 )
 checkpoint_manager = orbax.checkpoint.CheckpointManager(
     f"{checkpoints_root}/{run_name}",
-    options=options,
+    orbax_checkpointer,
+    options,
 )
+
+if restore_params_ckpt or restore_simmim_ckpt:
+    ckpt_path = restore_params_ckpt if restore_params_ckpt else restore_simmim_ckpt
+
+    throwaway_manager = orbax.checkpoint.CheckpointManager(
+        ckpt_path,
+        orbax_checkpointer,
+    )
+    latest_epoch = throwaway_manager.latest_step()
+    restored = throwaway_manager.restore(latest_epoch)
+
+    transforms = {}
+    if restore_simmim_ckpt:
+        tx_pairs = model.get_simmim_orbax_txs()
+        for tx_regex, tx_action in tx_pairs:
+            tx_action = orbax.checkpoint.Transform(original_key=tx_action)
+            transforms[tx_regex] = tx_action
+
+    restored = orbax.checkpoint.apply_transformations(restored, transforms, ckpt)
+
+    state = state.replace(params=restored["model"].params)
+    state = bv_utils.reshard(state, train_state_sharding)
+    del throwaway_manager
+
+latest_epoch = checkpoint_manager.latest_step()
+if latest_epoch is not None:
+    restored = checkpoint_manager.restore(latest_epoch, items=ckpt)
+    state = restored["model"]
+    metrics_history = restored["metrics_history"]
+else:
+    latest_epoch = 0
 
 if loss_weights_file:
     label_weights = np.load(loss_weights_file, allow_pickle=False)
@@ -685,12 +718,13 @@ for batch in train_ds:
         if args.checkpoints_keep > 0:
             ckpt["model"] = jax.device_get(state)
             ckpt["metrics_history"] = metrics_history
+            save_args = orbax_utils.save_args_from_target(ckpt)
             checkpoint_manager.save(
                 epochs,
-                args=orbax.checkpoint.args.StandardSave(ckpt),
+                ckpt,
+                save_kwargs={"save_args": save_args},
                 metrics={"val_loss": float(metrics_history["val_loss"][-1])},
             )
-            checkpoint_manager.wait_until_finished()
 
         # reset train_metrics for next training epoch
         metrics = bv_utils.reshard(metrics.empty(), repl_sharding)
