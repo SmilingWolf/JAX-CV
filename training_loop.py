@@ -216,6 +216,12 @@ parser.add_argument(
     type=str,
 )
 parser.add_argument(
+    "--restore-siglip-ckpt",
+    default="",
+    help="Restore the parameters from the last step of the given SigLIP-pretrained orbax checkpoint. Must be an absolute path",
+    type=str,
+)
+parser.add_argument(
     "--freeze-model-body",
     action="store_true",
     help="Freeze the feature extraction layers, train classifier head only",
@@ -359,6 +365,7 @@ batch_size = args.batch_size
 compute_units = jax.device_count()
 restore_params_ckpt = args.restore_params_ckpt
 restore_simmim_ckpt = args.restore_simmim_ckpt
+restore_siglip_ckpt = args.restore_siglip_ckpt
 
 # Dataset params
 image_size = args.image_size
@@ -412,6 +419,7 @@ train_config["cutout_patches"] = cutout_patches
 train_config["random_resize_method"] = random_resize_method
 train_config["restore_params_ckpt"] = restore_params_ckpt
 train_config["restore_simmim_ckpt"] = restore_simmim_ckpt
+train_config["restore_siglip_ckpt"] = restore_siglip_ckpt
 train_config["freeze_model_body"] = freeze_model_body
 train_config["reset_head"] = reset_head
 
@@ -595,8 +603,9 @@ checkpoint_manager = orbax.checkpoint.CheckpointManager(
     item_names=("model", "metrics_history"),
 )
 
-if restore_params_ckpt or restore_simmim_ckpt:
+if restore_params_ckpt or restore_simmim_ckpt or restore_siglip_ckpt:
     ckpt_path = restore_params_ckpt if restore_params_ckpt else restore_simmim_ckpt
+    ckpt_path = ckpt_path if ckpt_path else restore_siglip_ckpt
 
     throwaway_manager = orbax.checkpoint.CheckpointManager(
         ckpt_path,
@@ -611,7 +620,14 @@ if restore_params_ckpt or restore_simmim_ckpt:
         ),
     )
 
-    if restore_params_ckpt and reset_head:
+    if restore_siglip_ckpt:
+        restored["model"]["params"] = restored["model"]["params"]["image_enc"]
+
+    if (
+        (restore_params_ckpt or restore_siglip_ckpt)
+        and reset_head
+        and "head" in restored["model"]["params"]
+    ):
         del restored["model"]["params"]["head"]
 
     transforms = {}

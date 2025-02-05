@@ -77,6 +77,7 @@ class DataGenerator:
             "image_id": tf.io.FixedLenFeature([], tf.int64),
             "image_bytes": tf.io.FixedLenFeature([], tf.string),
             "label_indexes": tf.io.VarLenFeature(tf.int64),
+            "tag_string": tf.io.FixedLenFeature([], tf.string),
         }
 
         # Parse the input 'tf.train.Example' proto using the dictionary above.
