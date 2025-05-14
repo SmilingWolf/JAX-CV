@@ -12,7 +12,7 @@ import tensorflow as tf
 import wandb
 from clu import metrics
 from flax import jax_utils
-from flax.training import orbax_utils, train_state
+from flax.training import train_state
 from tqdm import tqdm
 
 import Models
@@ -25,8 +25,13 @@ class Metrics(metrics.Collection):
 
 
 class TrainState(train_state.TrainState):
-    metrics: Metrics
     constants: Any
+
+
+def create_metrics_state():
+    loss = metrics.Average.from_output("loss")
+    collection = Metrics.create(loss=loss)
+    return collection.empty()
 
 
 def create_train_state(
@@ -52,9 +57,6 @@ def create_train_state(
     del variables["params"]
     constants = variables
 
-    loss = metrics.Average.from_output("loss")
-    collection = Metrics.create(loss=loss)
-
     wd_mask = jax.tree_util.tree_map_with_path(module.should_decay, params)
     tx = optax.lamb(
         learning_rate,
@@ -67,12 +69,11 @@ def create_train_state(
         apply_fn=module.apply,
         params=params,
         tx=tx,
-        metrics=collection.empty(),
         constants=constants,
     )
 
 
-def train_step(state, batch, dropout_key):
+def train_step(state, batch, dropout_key, metrics):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
 
@@ -91,13 +92,12 @@ def train_step(state, batch, dropout_key):
     grads = jax.lax.pmean(grads, axis_name="batch")
     state = state.apply_gradients(grads=grads)
 
-    metric_updates = state.metrics.gather_from_model_output(loss=loss)
-    metrics = state.metrics.merge(metric_updates)
-    state = state.replace(metrics=metrics)
-    return state
+    metric_updates = metrics.gather_from_model_output(loss=loss)
+    metrics = metrics.merge(metric_updates)
+    return state, metrics
 
 
-def eval_step(*, state, batch):
+def eval_step(state, batch, metrics):
     loss, _ = state.apply_fn(
         {"params": state.params, **state.constants},
         batch["images"],
@@ -105,10 +105,9 @@ def eval_step(*, state, batch):
         train=False,
     )
 
-    metric_updates = state.metrics.gather_from_model_output(loss=loss)
-    metrics = state.metrics.merge(metric_updates)
-    state = state.replace(metrics=metrics)
-    return state
+    metric_updates = metrics.gather_from_model_output(loss=loss)
+    metrics = metrics.merge(metric_updates)
+    return state, metrics
 
 
 model_parser = argparse.ArgumentParser(
@@ -449,8 +448,8 @@ state = create_train_state(
 )
 del params_key
 
+metrics = create_metrics_state()
 metrics_history = {"train_loss": [], "val_loss": []}
-ckpt = {"model": state, "metrics_history": metrics_history}
 
 options_dict = dict(
     max_to_keep=args.checkpoints_keep,
@@ -460,38 +459,47 @@ options_dict = dict(
 if args.checkpoints_keep == -1:
     options_dict = dict(max_to_keep=1)
 
-orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 options = orbax.checkpoint.CheckpointManagerOptions(
     **options_dict,
     create=True,
 )
 checkpoint_manager = orbax.checkpoint.CheckpointManager(
     f"{checkpoints_root}/{run_name}",
-    orbax_checkpointer,
-    options,
+    options=options,
+    item_names=("model", "metrics_history"),
 )
 
 if restore_params_ckpt:
     throwaway_manager = orbax.checkpoint.CheckpointManager(
         restore_params_ckpt,
-        orbax_checkpointer,
+        item_names=("model", "metrics_history"),
     )
     latest_epoch = throwaway_manager.latest_step()
-    restored = throwaway_manager.restore(latest_epoch, items=ckpt)
-    state = state.replace(params=restored["model"].params)
+    restored = throwaway_manager.restore(
+        latest_epoch,
+        args=orbax.checkpoint.args.Composite(
+            model=orbax.checkpoint.args.StandardRestore(),
+            metrics_history=orbax.checkpoint.args.StandardRestore(),
+        ),
+    )
+    state = state.replace(params=restored["model"]["params"])
     del throwaway_manager
 
 latest_epoch = checkpoint_manager.latest_step()
 if latest_epoch is not None:
-    restored = checkpoint_manager.restore(latest_epoch, items=ckpt)
+    restore_args = orbax.checkpoint.args.Composite(
+        model=orbax.checkpoint.args.StandardRestore(state),
+        metrics_history=orbax.checkpoint.args.StandardRestore(),
+    )
+    restored = checkpoint_manager.restore(latest_epoch, args=restore_args)
     state = restored["model"]
     metrics_history = restored["metrics_history"]
-    state = state.replace(metrics=state.metrics.empty())
 else:
     latest_epoch = 0
 
 step = int(state.step)
 state = jax_utils.replicate(state)
+metrics = jax_utils.replicate(metrics)
 p_train_step = jax.pmap(train_step, axis_name="batch")
 p_eval_step = jax.pmap(eval_step, axis_name="batch")
 
@@ -500,10 +508,10 @@ pbar = tqdm(total=num_steps_per_epoch)
 for batch in train_ds:
     # Run optimization steps over training batches and compute batch metrics
     # get updated train state (which contains the updated parameters)
-    state = p_train_step(state=state, batch=batch, dropout_key=dropout_keys)
+    state, metrics = p_train_step(state, batch, dropout_keys, metrics)
 
     if step % 224 == 0:
-        merged_metrics = jax_utils.unreplicate(state.metrics)
+        merged_metrics = jax_utils.unreplicate(metrics)
         merged_metrics = jax.device_get(merged_metrics.loss.compute())
         pbar.set_postfix(loss=f"{merged_metrics:.04f}")
 
@@ -512,24 +520,22 @@ for batch in train_ds:
     # one training epoch has passed
     if (step + 1) % num_steps_per_epoch == 0:
         # compute metrics
-        merged_metrics = jax_utils.unreplicate(state.metrics)
+        merged_metrics = jax_utils.unreplicate(metrics)
         merged_metrics = jax.device_get(merged_metrics.compute())
         for metric, value in merged_metrics.items():
             # record metrics
             metrics_history[f"train_{metric}"].append(value)
 
         # reset train_metrics for validation
-        empty_metrics = state.metrics.empty()
-        empty_metrics = jax_utils.replicate(empty_metrics)
-        state = state.replace(metrics=empty_metrics)
+        metrics = jax_utils.replicate(metrics.empty())
 
         # Compute metrics on the validation set after each training epoch
         for val_step, val_batch in enumerate(val_ds):
-            state = p_eval_step(state=state, batch=val_batch)
+            state, metrics = p_eval_step(state, val_batch, metrics)
             if val_step == val_samples // global_batch_size:
                 break
 
-        merged_metrics = jax_utils.unreplicate(state.metrics)
+        merged_metrics = jax_utils.unreplicate(metrics)
         merged_metrics = jax.device_get(merged_metrics.compute())
         for metric, value in merged_metrics.items():
             metrics_history[f"val_{metric}"].append(value)
@@ -554,20 +560,20 @@ for batch in train_ds:
         )
 
         if args.checkpoints_keep > 0:
-            ckpt["model"] = jax.device_get(jax_utils.unreplicate(state))
-            ckpt["metrics_history"] = metrics_history
-            save_args = orbax_utils.save_args_from_target(ckpt)
+            save_state = jax.device_get(jax_utils.unreplicate(state))
             checkpoint_manager.save(
                 epochs,
-                ckpt,
-                save_kwargs={"save_args": save_args},
+                args=orbax.checkpoint.args.Composite(
+                    model=orbax.checkpoint.args.StandardSave(save_state),
+                    metrics_history=orbax.checkpoint.args.StandardSave(metrics_history),
+                ),
                 metrics={"val_loss": float(metrics_history["val_loss"][-1])},
             )
+            checkpoint_manager.wait_until_finished()
+            del save_state
 
         # reset train_metrics for next training epoch
-        empty_metrics = state.metrics.empty()
-        empty_metrics = jax_utils.replicate(empty_metrics)
-        state = state.replace(metrics=empty_metrics)
+        metrics = jax_utils.replicate(metrics.empty())
 
         epochs += 1
         if epochs == num_epochs:
