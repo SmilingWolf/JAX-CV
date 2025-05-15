@@ -153,14 +153,14 @@ parser.add_argument(
 )
 parser.add_argument(
     "--dataset-file",
-    default="datasets/aibooru.json",
     help="JSON file with dataset specs",
+    action="append",
     type=str,
 )
 parser.add_argument(
     "--dataset-root",
-    default="/home/smilingwolf/datasets",
     help="Dataset root, where the record_shards_train and record_shards_val folders are stored",
+    action="append",
     type=str,
 )
 parser.add_argument(
@@ -275,8 +275,16 @@ if run_name is None:
 
 checkpoints_root = args.checkpoints_root
 dataset_root = args.dataset_root
-with open(args.dataset_file) as f:
-    dataset_specs = json.load(f)
+
+train_samples = 0
+val_samples = 0
+for specs_file in args.dataset_file:
+    with open(specs_file) as f:
+        dataset_specs = json.load(f)
+
+    # Dataset params
+    train_samples += dataset_specs["train_samples"]
+    val_samples += dataset_specs["val_samples"]
 
 # Run params
 num_epochs = args.epochs
@@ -289,8 +297,6 @@ restore_params_ckpt = args.restore_params_ckpt
 # Dataset params
 image_size = args.image_size
 num_classes = 0
-train_samples = dataset_specs["train_samples"]
-val_samples = dataset_specs["val_samples"]
 
 # Model hyperparams
 patch_size = args.patch_size
@@ -378,7 +384,7 @@ dropout_keys = jax.random.split(key=dropout_key, num=jax.device_count())
 del root_key, dropout_key
 
 training_generator = DataGenerator(
-    f"{dataset_root}/record_shards_train/*",
+    [f"{root}/record_shards_train/*.tfrecord" for root in dataset_root],
     num_classes=num_classes,
     image_size=image_size,
     batch_size=batch_size,
@@ -397,7 +403,7 @@ train_ds = training_generator.genDS()
 train_ds = jax_utils.prefetch_to_device(train_ds.as_numpy_iterator(), size=2)
 
 validation_generator = DataGenerator(
-    f"{dataset_root}/record_shards_val/*",
+    [f"{root}/record_shards_val/*.tfrecord" for root in dataset_root],
     num_classes=num_classes,
     image_size=image_size,
     batch_size=batch_size,
