@@ -83,11 +83,11 @@ def fsdp_sharding(shape_tree, axis, mesh, size_in_mb):
         if np.prod(x.shape) * x.dtype.itemsize < size_in_mb * (2**20):
             return sharding
 
-        # Pray really hard your shapes are compatible w/ your device mesh
-        # because we're leaving error checking in the TODO list
-        idx = np.argsort(x.shape)[::-1][0]
-        sharding = sharding[:idx] + (axis,) + sharding[idx + 1 :]
-        return sharding
+        idxs = np.argsort(x.shape)[::-1]
+        for idx in idxs:
+            if x.shape[idx] % mesh.shape[axis] == 0:
+                sharding = sharding[:idx] + (axis,) + sharding[idx + 1 :]
+                return sharding
 
     sharding = jax.tree.map(_inject_axis, shape_tree, sharding)
     sharding = jax.tree.map(lambda _, x: PartitionSpec(*x), shape_tree, sharding)
