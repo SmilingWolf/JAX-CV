@@ -107,7 +107,7 @@ def eval_step(state, batch, metrics):
 
     metric_updates = metrics.gather_from_model_output(loss=loss)
     metrics = metrics.merge(metric_updates)
-    return state, metrics
+    return metrics
 
 
 model_parser = argparse.ArgumentParser(
@@ -537,7 +537,7 @@ for batch in train_ds:
 
         # Compute metrics on the validation set after each training epoch
         for val_step, val_batch in enumerate(val_ds):
-            state, metrics = p_eval_step(state, val_batch, metrics)
+            metrics = p_eval_step(state, val_batch, metrics)
             if val_step == val_samples // global_batch_size:
                 break
 
