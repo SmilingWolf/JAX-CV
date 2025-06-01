@@ -572,6 +572,17 @@ def eva02_base():
     return EVA02Transformer(**config)
 
 
+def eva02_base_deep():
+    config = {
+        "num_layers": 24,
+        "embed_dim": 576,
+        "mlp_dim": 1280,
+        "num_heads": 9,
+        "scale_mlp": True,
+    }
+    return EVA02Transformer(**config)
+
+
 def eva02_large():
     config = {
         "num_layers": 24,

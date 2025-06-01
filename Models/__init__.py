@@ -1,11 +1,12 @@
 from .ConvNext import convnext_base, convnext_small, convnext_tiny
-from .EVA02 import eva02_base, eva02_large, eva02_small
+from .EVA02 import eva02_base, eva02_base_deep, eva02_large, eva02_small
 from .HiViT import hivit_base, hivit_small, hivit_tiny
 from .SimMIM import (
     simmim_convnext_base,
     simmim_convnext_small,
     simmim_convnext_tiny,
     simmim_eva02_base,
+    simmim_eva02_base_deep,
     simmim_eva02_large,
     simmim_eva02_small,
     simmim_hivit_small,
@@ -33,6 +34,7 @@ model_registry = {
     "vit_large": vit_large,
     "eva02_small": eva02_small,
     "eva02_base": eva02_base,
+    "eva02_base_deep": eva02_base_deep,
     "eva02_large": eva02_large,
     "convnext_tiny": convnext_tiny,
     "convnext_small": convnext_small,
@@ -48,6 +50,7 @@ model_registry = {
     "simmim_vit_large": simmim_vit_large,
     "simmim_eva02_small": simmim_eva02_small,
     "simmim_eva02_base": simmim_eva02_base,
+    "simmim_eva02_base_deep": simmim_eva02_base_deep,
     "simmim_eva02_large": simmim_eva02_large,
     "simmim_hivit_tiny": simmim_hivit_tiny,
     "simmim_hivit_small": simmim_hivit_small,

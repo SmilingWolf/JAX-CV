@@ -531,6 +531,24 @@ def simmim_eva02_base():
     return SimMIM(**config)
 
 
+def simmim_eva02_base_deep():
+    config = {
+        "num_layers": 24,
+        "embed_dim": 576,
+        "mlp_dim": 1280,
+        "num_heads": 9,
+        "scale_mlp": True,
+    }
+    encoder = EVA02ForSimMIM(**config)
+
+    config = {
+        "encoder": encoder,
+        "encoder_stride": encoder.patch_size,
+        "patch_size": encoder.patch_size,
+    }
+    return SimMIM(**config)
+
+
 def simmim_eva02_large():
     config = {
         "num_layers": 24,
